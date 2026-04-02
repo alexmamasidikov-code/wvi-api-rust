@@ -18,14 +18,17 @@ mod export;
 mod settings;
 mod health;
 
+use std::sync::Arc;
 use axum::{
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use auth::privy::PrivyClient;
 
 #[tokio::main]
 async fn main() {
@@ -54,16 +57,28 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
+    // Privy client
+    let privy = Arc::new(PrivyClient::new(
+        cfg.privy_app_id.clone(),
+        cfg.privy_app_secret.clone(),
+    ));
+    if privy.is_configured() {
+        tracing::info!("Privy auth configured");
+    } else {
+        tracing::warn!("Privy not configured — using dev mode auth");
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
     let app = Router::new()
-        // ═══ AUTH (3) ═══
-        .route("/api/v1/auth/register", post(auth::handlers::register))
-        .route("/api/v1/auth/login", post(auth::handlers::login))
-        .route("/api/v1/auth/refresh", post(auth::handlers::refresh))
+        // ═══ AUTH — Privy (4) ═══
+        .route("/api/v1/auth/verify", post(auth::handlers::verify))
+        .route("/api/v1/auth/me", get(auth::handlers::me))
+        .route("/api/v1/auth/link-wallet", post(auth::handlers::link_wallet))
+        .route("/api/v1/auth/logout", post(auth::handlers::logout))
 
         // ═══ USERS (4) ═══
         .route("/api/v1/users/me", get(users::handlers::get_me).put(users::handlers::update_me))
@@ -194,6 +209,7 @@ async fn main() {
         .route("/api/v1/health/api-version", get(health::handlers::api_version))
         .route("/api/v1/docs.json", get(health::handlers::docs_json))
 
+        .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(pool);
