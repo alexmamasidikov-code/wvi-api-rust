@@ -1,0 +1,5280 @@
+openapi: 3.1.0
+info:
+  title: WVI - Wellness Vitality Index API
+  version: 1.0.0
+  description: |
+    The WVI API provides real-time wellness scoring by combining biometric data from wearable devices
+    (heart rate, HRV, SpO2, temperature, ECG, PPI, sleep, activity) with emotion detection and
+    activity recognition algorithms. The core WVI score (0-100) is computed from 10 weighted
+    sub-metrics and adjusted for circadian rhythm, emotional state, and physical activity context.
+
+    Key capabilities:
+    - Real-time WVI score with 10-metric breakdown
+    - 18-emotion detection from biometric signals
+    - 64-activity type recognition with TRIMP-based load scoring
+    - AI-powered interpretations from 8 expert perspectives (Genius Layer)
+    - Risk assessment, anomaly detection, and chronic pattern flagging
+    - Training recommendations based on readiness and load balance
+    - Sleep architecture analysis with debt tracking and optimal window prediction
+    - Full data export (CSV, JSON, PDF health summary)
+  contact:
+    name: WVI Health
+    email: dev@wvi.health
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8091/api/v1
+    description: Local development server
+
+tags:
+  - name: Auth
+    description: Authentication and token management via Privy
+  - name: Users
+    description: User profile and personal norm baselines
+  - name: Biometrics
+    description: Raw biometric data ingestion and retrieval (HR, HRV, SpO2, temperature, sleep, PPI, ECG, activity, derived metrics)
+  - name: WVI
+    description: Wellness Vitality Index score computation, history, trends, predictions, and simulation
+  - name: Emotions
+    description: Emotion detection from biometric signals, history, distribution, heatmaps, and streaks
+  - name: Activities
+    description: Activity detection, load tracking, HR zones, exercise logging, and recovery status
+  - name: Sleep
+    description: Sleep analysis including architecture, phases, consistency, debt, and optimal window
+  - name: AI
+    description: AI-powered interpretations, recommendations, chat, action plans, and Genius Layer
+  - name: Reports
+    description: Report generation, listing, templates, and downloads
+  - name: Alerts
+    description: Health alert management, thresholds, acknowledgment, and statistics
+  - name: Device
+    description: Wearable device status, sync, capabilities, firmware, and auto-monitoring
+  - name: Training
+    description: Training recommendations, weekly plans, overtraining risk, and optimal timing
+  - name: Risk
+    description: Health risk assessment, anomaly detection, chronic flags, correlations, and volatility
+  - name: Dashboard
+    description: Dashboard widgets, daily brief, and evening review
+  - name: Export
+    description: Data export in CSV, JSON, and PDF health summary formats
+  - name: Settings
+    description: Application settings and notification preferences
+  - name: Health
+    description: Server health checks and API version info (public, no auth required)
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ════════════════════════════════════════════════════════════════
+  # AUTH
+  # ════════════════════════════════════════════════════════════════
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      description: Creates a new user account and returns access and refresh tokens. The access token expires after the duration specified in expiresIn (seconds).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: user@wvi.health
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                name:
+                  type: string
+                  example: Alexander
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+                properties:
+                  data:
+                    $ref: '#/components/schemas/AuthResponse'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with credentials
+      description: Authenticates a user and returns access and refresh tokens. Use the access token as a Bearer token for all authenticated endpoints.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AuthResponse'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      description: Exchanges a valid refresh token for a new access token. Call this before the current access token expires to maintain the session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          accessToken:
+                            type: string
+                          expiresIn:
+                            type: integer
+                            description: Token lifetime in seconds
+
+  # ════════════════════════════════════════════════════════════════
+  # USERS
+  # ════════════════════════════════════════════════════════════════
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get current user profile
+      description: Returns the authenticated user's profile including demographic data used for personalized calculations (age, gender, height, weight).
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserProfile'
+    put:
+      tags: [Users]
+      summary: Update user profile
+      description: Updates the authenticated user's profile fields. Only provided fields are updated. Changes to age, weight, or gender may affect WVI calculations and personal norms.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserProfile'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/UserProfile'
+                          - type: object
+                            properties:
+                              updatedAt:
+                                type: string
+                                format: date-time
+
+  /users/me/norms:
+    get:
+      tags: [Users]
+      summary: Get personal norms
+      description: Returns the user's personal biometric baselines used for WVI calculation. These norms are either calibrated from historical data or set to population defaults.
+      responses:
+        '200':
+          description: Personal norms
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PersonalNorms'
+
+  /users/me/norms/calibrate:
+    post:
+      tags: [Users]
+      summary: Start norm calibration
+      description: Initiates a 7-day calibration period where the system collects baseline biometric data to establish personalized norms. During calibration, WVI scores use provisional baselines.
+      responses:
+        '200':
+          description: Calibration started
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            example: calibration_started
+                          estimatedDuration:
+                            type: string
+                            example: 7 days
+                          message:
+                            type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # BIOMETRICS
+  # ════════════════════════════════════════════════════════════════
+  /biometrics/sync:
+    post:
+      tags: [Biometrics]
+      summary: Bulk sync biometric data
+      description: Uploads a batch of biometric records from the wearable device. Accepts mixed metric types in a single request. Returns the number of records processed and sync duration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricSyncRequest'
+      responses:
+        '200':
+          description: Sync completed
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricSyncResult'
+
+  /biometrics/heart-rate:
+    get:
+      tags: [Biometrics]
+      summary: Get heart rate data
+      description: Returns current heart rate, resting HR, min/max for the period, and time-series history. Use from/to params to specify a date range.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Heart rate data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current:
+                            type: integer
+                            example: 72
+                          min:
+                            type: integer
+                            example: 58
+                          max:
+                            type: integer
+                            example: 145
+                          resting:
+                            type: integer
+                            example: 62
+                          unit:
+                            type: string
+                            example: bpm
+                          history:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/TimeSeriesPoint'
+    post:
+      tags: [Biometrics]
+      summary: Upload heart rate records
+      description: Uploads one or more heart rate measurement records. Each record should include a timestamp and bpm value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/hrv:
+    get:
+      tags: [Biometrics]
+      summary: Get HRV data
+      description: Returns heart rate variability metrics including RMSSD, SDNN, lnRMSSD, and pNN50. RMSSD is the primary HRV indicator used in WVI calculation.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: HRV data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          rmssd:
+                            type: number
+                            example: 68.4
+                            description: Root mean square of successive differences (ms)
+                          sdnn:
+                            type: number
+                            example: 74.2
+                            description: Standard deviation of NN intervals (ms)
+                          lnRmssd:
+                            type: number
+                            example: 4.23
+                            description: Natural log of RMSSD
+                          pnn50:
+                            type: number
+                            example: 32.1
+                            description: Percentage of successive intervals differing by more than 50ms
+                          unit:
+                            type: string
+                            example: ms
+                          history:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                ts:
+                                  type: string
+                                  format: date-time
+                                rmssd:
+                                  type: number
+                                sdnn:
+                                  type: number
+    post:
+      tags: [Biometrics]
+      summary: Upload HRV records
+      description: Uploads HRV measurement records. Each record should include RMSSD and optionally SDNN, pNN50, stress, heart rate, and blood pressure values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/spo2:
+    get:
+      tags: [Biometrics]
+      summary: Get SpO2 data
+      description: Returns blood oxygen saturation readings. Normal range is 95-100%. Values below 92% trigger critical alerts.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: SpO2 data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current:
+                            type: number
+                            example: 98
+                          min:
+                            type: number
+                            example: 95
+                          max:
+                            type: number
+                            example: 99
+                          unit:
+                            type: string
+                            example: "%"
+                          history:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/TimeSeriesPoint'
+    post:
+      tags: [Biometrics]
+      summary: Upload SpO2 records
+      description: Uploads blood oxygen saturation measurement records.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/temperature:
+    get:
+      tags: [Biometrics]
+      summary: Get temperature data
+      description: Returns body temperature readings in Celsius from the wrist sensor. Normal range is 36.1-37.2C. Temperature deviations from the personal baseline are used in WVI calculation.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Temperature data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current:
+                            type: number
+                            example: 36.6
+                          min:
+                            type: number
+                            example: 36.1
+                          max:
+                            type: number
+                            example: 37.0
+                          unit:
+                            type: string
+                            example: celsius
+                          history:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/TimeSeriesPoint'
+    post:
+      tags: [Biometrics]
+      summary: Upload temperature records
+      description: Uploads body temperature measurement records.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/sleep:
+    get:
+      tags: [Biometrics]
+      summary: Get sleep biometric data
+      description: Returns raw sleep metrics including total/deep/light/REM/awake minutes, sleep efficiency, and start/end times. For detailed analysis see the /sleep endpoints.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Sleep biometric data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          totalMinutes:
+                            type: integer
+                            example: 462
+                          deepMinutes:
+                            type: integer
+                            example: 95
+                          lightMinutes:
+                            type: integer
+                            example: 248
+                          remMinutes:
+                            type: integer
+                            example: 102
+                          awakeMinutes:
+                            type: integer
+                            example: 17
+                          efficiency:
+                            type: number
+                            example: 0.92
+                          startTime:
+                            type: string
+                            format: date-time
+                          endTime:
+                            type: string
+                            format: date-time
+    post:
+      tags: [Biometrics]
+      summary: Upload sleep records
+      description: Uploads sleep tracking records from the wearable device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/ppi:
+    get:
+      tags: [Biometrics]
+      summary: Get PPI data
+      description: Returns peak-to-peak interval data from the PPG sensor. Includes raw intervals in milliseconds, mean PPI, and cardiac coherence score (0-1). Coherence reflects heart rhythm regularity and is used in WVI calculation.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: PPI data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          intervals:
+                            type: array
+                            items:
+                              type: number
+                            description: Peak-to-peak intervals in milliseconds
+                          unit:
+                            type: string
+                            example: ms
+                          meanPPI:
+                            type: number
+                            example: 809.2
+                          coherence:
+                            type: number
+                            example: 0.78
+                            description: Cardiac coherence score (0-1)
+    post:
+      tags: [Biometrics]
+      summary: Upload PPI records
+      description: Uploads peak-to-peak interval records including raw intervals and coherence values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/ecg:
+    get:
+      tags: [Biometrics]
+      summary: Get ECG data
+      description: Returns electrocardiogram session data including waveform samples (in microvolts), sample rate, rhythm classification, and heart rate derived from the ECG signal.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: ECG data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          samples:
+                            type: array
+                            items:
+                              type: number
+                            description: ECG waveform samples in millivolts
+                          sampleRate:
+                            type: integer
+                            example: 125
+                          unit:
+                            type: string
+                            example: mV
+                          rhythm:
+                            type: string
+                            enum: [normal_sinus, atrial_fibrillation, other]
+                          heartRate:
+                            type: integer
+                            example: 72
+    post:
+      tags: [Biometrics]
+      summary: Upload ECG records
+      description: Uploads ECG session records including waveform samples and metadata.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/activity:
+    get:
+      tags: [Biometrics]
+      summary: Get activity biometric data
+      description: Returns step count, calories burned, distance traveled, active minutes, and current detected activity type. For detailed activity detection see /activities/current.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Activity biometric data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          steps:
+                            type: integer
+                            example: 8420
+                          calories:
+                            type: integer
+                            example: 2150
+                          distance:
+                            type: number
+                            example: 6.3
+                            description: Distance in kilometers
+                          activeMinutes:
+                            type: integer
+                            example: 47
+                          unit:
+                            type: string
+                            example: metric
+                          currentType:
+                            type: string
+                            example: sitting_working
+    post:
+      tags: [Biometrics]
+      summary: Upload activity records
+      description: Uploads activity tracking records from the wearable device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BiometricUploadRequest'
+      responses:
+        '201':
+          description: Data saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BiometricUploadResult'
+
+  /biometrics/blood-pressure:
+    get:
+      tags: [Biometrics]
+      summary: Get blood pressure data
+      description: Returns derived blood pressure values (systolic/diastolic) estimated from pulse wave analysis. Includes classification according to standard BP categories.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Blood pressure data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          systolic:
+                            type: integer
+                            example: 118
+                          diastolic:
+                            type: integer
+                            example: 74
+                          pulse:
+                            type: integer
+                            example: 72
+                          unit:
+                            type: string
+                            example: mmHg
+                          classification:
+                            type: string
+                            enum: [optimal, normal, high_normal, hypertension_1, hypertension_2]
+                            example: normal
+                          measuredAt:
+                            type: string
+                            format: date-time
+
+  /biometrics/stress:
+    get:
+      tags: [Biometrics]
+      summary: Get stress data
+      description: Returns the current stress index (0-100) derived from HRV frequency domain analysis. Lower values indicate less stress. The level field maps the numeric value to a human-readable category.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Stress data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current:
+                            type: number
+                            example: 35
+                          level:
+                            type: string
+                            enum: [low, moderate, high, very_high]
+                            example: low
+                          unit:
+                            type: string
+                            example: index_0_100
+                          history:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/TimeSeriesPoint'
+
+  /biometrics/breathing-rate:
+    get:
+      tags: [Biometrics]
+      summary: Get breathing rate data
+      description: Returns respiratory rate derived from PPG waveform modulation. Normal adult range is 12-20 breaths per minute.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Breathing rate data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current:
+                            type: number
+                            example: 16
+                          unit:
+                            type: string
+                            example: breaths_per_min
+                          history:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/TimeSeriesPoint'
+
+  /biometrics/rmssd:
+    get:
+      tags: [Biometrics]
+      summary: Get RMSSD data
+      description: Returns the root mean square of successive differences, the primary HRV time-domain metric. Higher values generally indicate better parasympathetic tone and recovery.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: RMSSD data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current:
+                            type: number
+                            example: 68.4
+                          unit:
+                            type: string
+                            example: ms
+                          trend:
+                            type: string
+                            enum: [improving, stable, declining]
+                          history:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/TimeSeriesPoint'
+
+  /biometrics/coherence:
+    get:
+      tags: [Biometrics]
+      summary: Get cardiac coherence data
+      description: Returns the cardiac coherence score (0-1) derived from PPI interval regularity analysis. Values above 0.6 indicate good coherence, often achieved during controlled breathing or meditation.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+        - $ref: '#/components/parameters/granularity'
+      responses:
+        '200':
+          description: Coherence data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          score:
+                            type: number
+                            example: 0.78
+                          level:
+                            type: string
+                            enum: [low, medium, high]
+                          unit:
+                            type: string
+                            example: ratio_0_1
+                          history:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                ts:
+                                  type: string
+                                  format: date-time
+                                score:
+                                  type: number
+
+  /biometrics/realtime:
+    get:
+      tags: [Biometrics]
+      summary: Get real-time biometric snapshot
+      description: Returns the latest values for all primary biometric signals in a single response. Useful for live dashboards and real-time monitoring.
+      responses:
+        '200':
+          description: Real-time biometric snapshot
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          hr:
+                            type: integer
+                            example: 72
+                          hrv:
+                            type: number
+                            example: 68.4
+                          spo2:
+                            type: number
+                            example: 98
+                          stress:
+                            type: number
+                            example: 35
+                          temperature:
+                            type: number
+                            example: 36.6
+                          activity:
+                            type: string
+                            example: sitting_working
+                          sampledAt:
+                            type: string
+                            format: date-time
+
+  /biometrics/summary:
+    get:
+      tags: [Biometrics]
+      summary: Get daily biometric summary
+      description: Returns aggregated biometric statistics for a given day including averages, minimums, and maximums for all tracked metrics.
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Date to summarize (defaults to today)
+      responses:
+        '200':
+          description: Daily biometric summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DailySummary'
+
+  # ════════════════════════════════════════════════════════════════
+  # WVI
+  # ════════════════════════════════════════════════════════════════
+  /wvi/current:
+    get:
+      tags: [WVI]
+      summary: Get current WVI score with emotion and activity
+      description: |
+        Computes the real-time Wellness Vitality Index score from the latest biometric data.
+        Returns the WVI breakdown (10 sub-scores with weights), the detected emotion, and the detected activity.
+
+        You can override biometric inputs via query parameters for testing:
+        hr, hrv, stress, spo2, temp, sys, dia, coherence, sleepMin, deep, steps, activeMins, mets, stepsPerMin.
+      parameters:
+        - name: hr
+          in: query
+          schema:
+            type: number
+          description: Heart rate override (bpm)
+        - name: hrv
+          in: query
+          schema:
+            type: number
+          description: HRV RMSSD override (ms)
+        - name: stress
+          in: query
+          schema:
+            type: number
+          description: Stress index override (0-100)
+        - name: spo2
+          in: query
+          schema:
+            type: number
+          description: SpO2 override (%)
+        - name: temp
+          in: query
+          schema:
+            type: number
+          description: Body temperature override (Celsius)
+        - name: sys
+          in: query
+          schema:
+            type: number
+          description: Systolic blood pressure override (mmHg)
+        - name: dia
+          in: query
+          schema:
+            type: number
+          description: Diastolic blood pressure override (mmHg)
+        - name: coherence
+          in: query
+          schema:
+            type: number
+          description: PPI coherence override (0-1)
+        - name: sleepMin
+          in: query
+          schema:
+            type: number
+          description: Total sleep minutes override
+        - name: deep
+          in: query
+          schema:
+            type: number
+          description: Deep sleep percentage override
+        - name: steps
+          in: query
+          schema:
+            type: number
+          description: Step count override
+        - name: activeMins
+          in: query
+          schema:
+            type: number
+          description: Active minutes override
+        - name: mets
+          in: query
+          schema:
+            type: number
+          description: METs override
+        - name: stepsPerMin
+          in: query
+          schema:
+            type: number
+          description: Steps per minute override (used for activity detection)
+      responses:
+        '200':
+          description: WVI snapshot with emotion and activity
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/WVISnapshot'
+
+  /wvi/history:
+    get:
+      tags: [WVI]
+      summary: Get WVI score history
+      description: Returns daily WVI scores over the specified period. Use the period query parameter to control the time range.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 14d, 30d, 90d]
+            default: 30d
+          description: History period
+      responses:
+        '200':
+          description: WVI history entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          entries:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                date:
+                                  type: string
+                                  format: date
+                                score:
+                                  type: number
+
+  /wvi/trends:
+    get:
+      tags: [WVI]
+      summary: Get WVI trend analysis
+      description: Returns trend direction (improving/stable/declining), slope, confidence, average score, and best/worst days over the specified period.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 14d, 30d, 90d]
+            default: 30d
+      responses:
+        '200':
+          description: Trend analysis
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          direction:
+                            type: string
+                            enum: [improving, stable, declining]
+                          slope:
+                            type: number
+                            description: Points per day change
+                          confidence:
+                            type: number
+                          avgScore:
+                            type: number
+                          bestDay:
+                            type: object
+                            properties:
+                              date:
+                                type: string
+                                format: date
+                              score:
+                                type: number
+                          worstDay:
+                            type: object
+                            properties:
+                              date:
+                                type: string
+                                format: date
+                              score:
+                                type: number
+
+  /wvi/predict:
+    get:
+      tags: [WVI]
+      summary: Predict future WVI score
+      description: Uses recent trends and patterns to predict the WVI score for the next 24 hours. Returns the predicted score, confidence interval, and contributing factors.
+      parameters:
+        - name: horizon
+          in: query
+          schema:
+            type: string
+            enum: [6h, 12h, 24h, 48h]
+            default: 24h
+          description: Prediction horizon
+      responses:
+        '200':
+          description: WVI prediction
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          predictedScore:
+                            type: number
+                          confidence:
+                            type: number
+                          horizon:
+                            type: string
+                          factors:
+                            type: array
+                            items:
+                              type: string
+
+  /wvi/simulate:
+    post:
+      tags: [WVI]
+      summary: Simulate WVI with changed inputs
+      description: Runs a what-if simulation by modifying one or more biometric inputs and computing the resulting WVI score. Shows the delta from the current score and a natural-language scenario description.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                changes:
+                  type: object
+                  description: Key-value pairs of metric changes to simulate
+                  additionalProperties:
+                    type: number
+                  example:
+                    sleepHours: 8
+                    steps: 10000
+      responses:
+        '200':
+          description: Simulation result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          currentScore:
+                            type: number
+                          simulatedScore:
+                            type: number
+                          delta:
+                            type: number
+                          scenario:
+                            type: string
+                          confidence:
+                            type: number
+
+  /wvi/circadian:
+    get:
+      tags: [WVI]
+      summary: Get circadian WVI pattern
+      description: Returns the 24-hour circadian rhythm of WVI scores, showing peak and trough hours and the current phase (ascending/descending/peak/trough).
+      responses:
+        '200':
+          description: Circadian pattern
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          peakHour:
+                            type: integer
+                            example: 10
+                          troughHour:
+                            type: integer
+                            example: 15
+                          currentPhase:
+                            type: string
+                            enum: [ascending, descending, peak, trough]
+                          hourlyScores:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                hour:
+                                  type: integer
+                                score:
+                                  type: number
+
+  /wvi/correlations:
+    get:
+      tags: [WVI]
+      summary: Get metric correlations with WVI
+      description: Returns Pearson correlation coefficients between various biometric metrics and the WVI score, along with p-values for statistical significance.
+      responses:
+        '200':
+          description: Correlation pairs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          pairs:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                metricA:
+                                  type: string
+                                metricB:
+                                  type: string
+                                r:
+                                  type: number
+                                  description: Pearson correlation coefficient (-1 to 1)
+                                p:
+                                  type: number
+                                  description: P-value for statistical significance
+
+  /wvi/breakdown:
+    get:
+      tags: [WVI]
+      summary: Get WVI score breakdown
+      description: Returns the overall WVI score decomposed into its 10 component metrics with individual weights and weighted contributions. Useful for understanding which metrics are driving the score.
+      responses:
+        '200':
+          description: Score breakdown
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          score:
+                            type: number
+                            example: 78
+                          weights:
+                            type: object
+                            description: Weight of each metric in WVI calculation (sums to 1.0)
+                            properties:
+                              hr:
+                                type: number
+                              hrv:
+                                type: number
+                              stress:
+                                type: number
+                              spo2:
+                                type: number
+                              temperature:
+                                type: number
+                              sleep:
+                                type: number
+                              activity:
+                                type: number
+                              bloodPressure:
+                                type: number
+                              ppiCoherence:
+                                type: number
+                              emotionalWellbeing:
+                                type: number
+                          contributions:
+                            type: object
+                            description: Weighted contribution of each metric to the total score
+                            additionalProperties:
+                              type: number
+
+  /wvi/compare:
+    get:
+      tags: [WVI]
+      summary: Compare WVI between two periods
+      description: Compares average WVI scores and individual metric changes between two date ranges. Useful for tracking improvement over time or comparing different lifestyle patterns.
+      parameters:
+        - name: period1
+          in: query
+          required: true
+          schema:
+            type: string
+          description: First period as start/end dates (e.g. 2026-03-01/2026-03-15)
+          example: 2026-03-01/2026-03-15
+        - name: period2
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Second period as start/end dates (e.g. 2026-03-16/2026-03-31)
+          example: 2026-03-16/2026-03-31
+      responses:
+        '200':
+          description: Period comparison
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period1:
+                            type: object
+                            properties:
+                              range:
+                                type: string
+                              avgWVI:
+                                type: number
+                              avgEmotion:
+                                type: string
+                              avgActivity:
+                                type: string
+                          period2:
+                            type: object
+                            properties:
+                              range:
+                                type: string
+                              avgWVI:
+                                type: number
+                              avgEmotion:
+                                type: string
+                              avgActivity:
+                                type: string
+                          delta:
+                            type: number
+                            description: WVI score difference (period2 - period1)
+                          trend:
+                            type: string
+                            enum: [improving, stable, declining]
+                          metricChanges:
+                            type: object
+                            description: Per-metric score changes between periods
+                            additionalProperties:
+                              type: number
+
+  # ════════════════════════════════════════════════════════════════
+  # EMOTIONS
+  # ════════════════════════════════════════════════════════════════
+  /emotions/current:
+    get:
+      tags: [Emotions]
+      summary: Get current detected emotion
+      description: |
+        Runs the emotion detection algorithm on the latest biometric signals and returns the primary and secondary emotions with confidence scores, emoji, category, and all 18 emotion scores.
+
+        You can override biometric inputs via query parameters for testing:
+        hr, hrv, stress, spo2, temp, coherence, rmssd, sleepScore, activityScore, sys, restingHR.
+      parameters:
+        - name: hr
+          in: query
+          schema:
+            type: number
+          description: Heart rate override (bpm)
+        - name: hrv
+          in: query
+          schema:
+            type: number
+          description: HRV RMSSD override (ms)
+        - name: stress
+          in: query
+          schema:
+            type: number
+          description: Stress index override (0-100)
+        - name: spo2
+          in: query
+          schema:
+            type: number
+          description: SpO2 override (%)
+        - name: temp
+          in: query
+          schema:
+            type: number
+          description: Temperature override (Celsius)
+        - name: coherence
+          in: query
+          schema:
+            type: number
+          description: PPI coherence override (0-1)
+        - name: rmssd
+          in: query
+          schema:
+            type: number
+          description: PPI RMSSD override (ms)
+        - name: sleepScore
+          in: query
+          schema:
+            type: number
+          description: Sleep score override (0-100)
+        - name: activityScore
+          in: query
+          schema:
+            type: number
+          description: Activity score override (0-100)
+        - name: sys
+          in: query
+          schema:
+            type: number
+          description: Systolic BP override (mmHg)
+        - name: restingHR
+          in: query
+          schema:
+            type: number
+          description: Resting heart rate override (bpm)
+      responses:
+        '200':
+          description: Current emotion detection result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EmotionResult'
+
+  /emotions/history:
+    get:
+      tags: [Emotions]
+      summary: Get emotion history
+      description: Returns a time series of detected emotions over the specified period, showing how emotional state evolved throughout the day.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [6h, 12h, 24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Emotion history
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          entries:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                ts:
+                                  type: string
+                                  format: date-time
+                                emotion:
+                                  type: string
+                                confidence:
+                                  type: number
+
+  /emotions/wellbeing:
+    get:
+      tags: [Emotions]
+      summary: Get emotional wellbeing score
+      description: Returns an aggregate emotional wellbeing score (0-100) based on the ratio of positive to negative emotions, dominant emotion, and trend over the specified period.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 14d, 30d]
+            default: 7d
+      responses:
+        '200':
+          description: Wellbeing assessment
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          score:
+                            type: number
+                          trend:
+                            type: string
+                            enum: [improving, stable, declining]
+                          positiveRatio:
+                            type: number
+                            description: Fraction of time spent in positive emotions (0-1)
+                          dominantEmotion:
+                            type: string
+                          period:
+                            type: string
+
+  /emotions/distribution:
+    get:
+      tags: [Emotions]
+      summary: Get emotion distribution
+      description: Returns the percentage of time spent in each detected emotion over the specified period. Useful for understanding emotional patterns and balance.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 7d
+      responses:
+        '200':
+          description: Emotion distribution
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          distribution:
+                            type: object
+                            additionalProperties:
+                              type: number
+                            description: Emotion name to fraction of time (0-1)
+
+  /emotions/heatmap:
+    get:
+      tags: [Emotions]
+      summary: Get emotion heatmap
+      description: Returns a 7-day by 24-hour grid of detected emotions with intensity values. Each cell contains the dominant emotion and its intensity for that hour of that day.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 14d, 30d]
+            default: 7d
+      responses:
+        '200':
+          description: Emotion heatmap grid
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          grid:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                day:
+                                  type: integer
+                                hours:
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      hour:
+                                        type: integer
+                                      emotion:
+                                        type: string
+                                      intensity:
+                                        type: number
+
+  /emotions/transitions:
+    get:
+      tags: [Emotions]
+      summary: Get emotion transitions
+      description: Returns the sequence of emotion state changes over the specified period, including transition counts and average duration in each state before transitioning.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Emotion transitions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          transitions:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                from:
+                                  type: string
+                                to:
+                                  type: string
+                                count:
+                                  type: integer
+                                avgDuration:
+                                  type: string
+
+  /emotions/triggers:
+    get:
+      tags: [Emotions]
+      summary: Get emotion triggers
+      description: Identifies biometric and behavioral patterns that correlate with specific emotions. Helps users understand what drives their emotional states.
+      responses:
+        '200':
+          description: Emotion triggers
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          triggers:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                emotion:
+                                  type: string
+                                trigger:
+                                  type: string
+                                correlation:
+                                  type: number
+
+  /emotions/streaks:
+    get:
+      tags: [Emotions]
+      summary: Get emotion streaks
+      description: Returns current and longest streaks for positive emotional states. Tracks consecutive days of predominantly positive or focused emotions.
+      responses:
+        '200':
+          description: Emotion streaks
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          currentStreak:
+                            type: object
+                            properties:
+                              emotion:
+                                type: string
+                              days:
+                                type: integer
+                          longestStreak:
+                            type: object
+                            properties:
+                              emotion:
+                                type: string
+                              days:
+                                type: integer
+                              startDate:
+                                type: string
+                                format: date
+                          streaks:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                current:
+                                  type: integer
+
+  # ════════════════════════════════════════════════════════════════
+  # ACTIVITIES
+  # ════════════════════════════════════════════════════════════════
+  /activities/current:
+    get:
+      tags: [Activities]
+      summary: Get current detected activity
+      description: |
+        Runs the activity detection cascade algorithm on the latest biometric signals and returns the detected activity type, category, load level, HR zone, METs, and calories.
+
+        You can override biometric inputs via query parameters for testing:
+        hr, restingHR, maxHR, hrv, stress, spo2, temp, coherence, stepsPerMin, stepCadence, hrVar, hrInterval, hrRamp, hrAccel, breathReg, minsSince, weight, gender.
+      parameters:
+        - name: hr
+          in: query
+          schema:
+            type: number
+          description: Heart rate override (bpm)
+        - name: restingHR
+          in: query
+          schema:
+            type: number
+          description: Resting heart rate override (bpm)
+        - name: maxHR
+          in: query
+          schema:
+            type: number
+          description: Max heart rate override (bpm)
+        - name: hrv
+          in: query
+          schema:
+            type: number
+          description: HRV RMSSD override (ms)
+        - name: stress
+          in: query
+          schema:
+            type: number
+          description: Stress index override (0-100)
+        - name: spo2
+          in: query
+          schema:
+            type: number
+          description: SpO2 override (%)
+        - name: temp
+          in: query
+          schema:
+            type: number
+          description: Temperature override (Celsius)
+        - name: coherence
+          in: query
+          schema:
+            type: number
+          description: PPI coherence override (0-1)
+        - name: stepsPerMin
+          in: query
+          schema:
+            type: number
+          description: Steps per minute (0 = stationary, 60-80 = walking, 150+ = running)
+        - name: stepCadence
+          in: query
+          schema:
+            type: number
+          description: Step cadence regularity (0-1)
+        - name: weight
+          in: query
+          schema:
+            type: number
+          description: Body weight in kg (for calorie calculation)
+        - name: gender
+          in: query
+          schema:
+            type: string
+            enum: [male, female]
+          description: Gender (for calorie calculation)
+      responses:
+        '200':
+          description: Current activity detection result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ActivityResult'
+
+  /activities/history:
+    get:
+      tags: [Activities]
+      summary: Get activity history
+      description: Returns a timeline of detected activities over the specified period with start/end times, activity type, and calories burned.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Activity timeline
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          activities:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                start:
+                                  type: string
+                                  format: date-time
+                                end:
+                                  type: string
+                                  format: date-time
+                                  nullable: true
+                                steps:
+                                  type: integer
+                                calories:
+                                  type: number
+
+  /activities/load:
+    get:
+      tags: [Activities]
+      summary: Get training load metrics
+      description: Returns TRIMP-based training load metrics including acute load (7-day), chronic load (28-day), and the acute-to-chronic workload ratio. A ratio between 0.8-1.3 is considered the optimal training zone.
+      responses:
+        '200':
+          description: Training load data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          trimp:
+                            type: number
+                            description: Today's TRIMP score
+                          acuteLoad:
+                            type: number
+                            description: 7-day exponentially weighted load
+                          chronicLoad:
+                            type: number
+                            description: 28-day exponentially weighted load
+                          ratio:
+                            type: number
+                            description: Acute-to-chronic workload ratio
+                          status:
+                            type: string
+                            enum: [undertrained, optimal, overreaching, danger]
+                          zone:
+                            type: string
+
+  /activities/zones:
+    get:
+      tags: [Activities]
+      summary: Get HR zone distribution
+      description: Returns time spent in each of the 5 heart rate training zones today, with zone boundaries based on the user's max HR.
+      responses:
+        '200':
+          description: HR zone breakdown
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          zones:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                zone:
+                                  type: integer
+                                name:
+                                  type: string
+                                min:
+                                  type: integer
+                                  description: Zone lower bound (% of max HR)
+                                max:
+                                  type: integer
+                                  description: Zone upper bound (% of max HR)
+                                pctHrMax:
+                                  type: string
+                                minutesToday:
+                                  type: integer
+
+  /activities/categories:
+    get:
+      tags: [Activities]
+      summary: Get activity categories summary
+      description: Returns time spent in each activity intensity category (sedentary, light, moderate, vigorous) with the specific activity types in each category.
+      responses:
+        '200':
+          description: Activity categories
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          categories:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                name:
+                                  type: string
+                                types:
+                                  type: array
+                                  items:
+                                    type: string
+                                totalMinutes:
+                                  type: integer
+
+  /activities/transitions:
+    get:
+      tags: [Activities]
+      summary: Get activity transitions
+      description: Returns the sequence of activity state changes throughout the day with timestamps for each transition.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d]
+            default: 24h
+      responses:
+        '200':
+          description: Activity transitions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          transitions:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                from:
+                                  type: string
+                                to:
+                                  type: string
+                                at:
+                                  type: string
+                                  format: date-time
+
+  /activities/sedentary:
+    get:
+      tags: [Activities]
+      summary: Get sedentary behavior analysis
+      description: Returns sedentary behavior metrics including total sedentary minutes, longest unbroken sedentary bout, number of bouts, and breaks taken. Includes a recommendation for improving movement patterns.
+      responses:
+        '200':
+          description: Sedentary analysis
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          totalMinutes:
+                            type: integer
+                          longestBout:
+                            type: integer
+                            description: Longest unbroken sedentary period (minutes)
+                          bouts:
+                            type: integer
+                          breaksTaken:
+                            type: integer
+                          recommendation:
+                            type: string
+
+  /activities/exercise-log:
+    get:
+      tags: [Activities]
+      summary: Get exercise log
+      description: Returns a list of completed exercise sessions with type, duration, calories, and heart rate data for each session.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+      responses:
+        '200':
+          description: Exercise log entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          exercises:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                id:
+                                  type: string
+                                type:
+                                  type: string
+                                duration:
+                                  type: integer
+                                  description: Duration in minutes
+                                calories:
+                                  type: number
+                                hr:
+                                  type: object
+                                  properties:
+                                    avg:
+                                      type: integer
+                                    max:
+                                      type: integer
+                                date:
+                                  type: string
+                                  format: date
+
+  /activities/recovery-status:
+    get:
+      tags: [Activities]
+      summary: Get recovery status
+      description: Returns current recovery status based on resting HR recovery, HRV trends, and recent training load. Includes readiness level and a training recommendation.
+      responses:
+        '200':
+          description: Recovery status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [recovered, recovering, fatigued, overtrained]
+                          score:
+                            type: number
+                          readiness:
+                            type: string
+                            enum: [high, moderate, low]
+                          hrRecovery:
+                            type: object
+                            properties:
+                              resting:
+                                type: integer
+                              current:
+                                type: integer
+                              delta:
+                                type: integer
+                          recommendation:
+                            type: string
+
+  /activities/manual-log:
+    post:
+      tags: [Activities]
+      summary: Manually log an exercise
+      description: Manually records an exercise session that was not automatically detected by the wearable device. Returns the created exercise entry with its assigned ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, duration]
+              properties:
+                type:
+                  type: string
+                  description: Activity type
+                  example: yoga
+                duration:
+                  type: integer
+                  description: Duration in minutes
+                  example: 45
+                calories:
+                  type: number
+                  description: Optional calories burned
+                notes:
+                  type: string
+      responses:
+        '201':
+          description: Exercise logged
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          type:
+                            type: string
+                          duration:
+                            type: integer
+                          logged:
+                            type: boolean
+                          loggedAt:
+                            type: string
+                            format: date-time
+
+  # ════════════════════════════════════════════════════════════════
+  # SLEEP
+  # ════════════════════════════════════════════════════════════════
+  /sleep/last-night:
+    get:
+      tags: [Sleep]
+      summary: Get last night sleep summary
+      description: Returns a comprehensive summary of the most recent sleep session including score, duration, efficiency, sleep phase breakdown, latency, and number of wakeups.
+      responses:
+        '200':
+          description: Last night sleep data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          score:
+                            type: number
+                          totalMinutes:
+                            type: integer
+                          efficiency:
+                            type: number
+                          phases:
+                            type: object
+                            properties:
+                              deep:
+                                type: integer
+                              light:
+                                type: integer
+                              rem:
+                                type: integer
+                              awake:
+                                type: integer
+                          start:
+                            type: string
+                            format: date-time
+                          end:
+                            type: string
+                            format: date-time
+                          latency:
+                            type: integer
+                            description: Minutes to fall asleep
+                          wakeups:
+                            type: integer
+
+  /sleep/score-history:
+    get:
+      tags: [Sleep]
+      summary: Get sleep score history
+      description: Returns daily sleep scores over the specified period for tracking sleep quality trends.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 14d, 30d, 90d]
+            default: 14d
+      responses:
+        '200':
+          description: Sleep score history
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          scores:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                date:
+                                  type: string
+                                  format: date
+                                score:
+                                  type: number
+
+  /sleep/architecture:
+    get:
+      tags: [Sleep]
+      summary: Get sleep architecture
+      description: Returns detailed sleep cycle analysis including the number of completed cycles, stage-by-stage timeline, and percentage breakdown of each sleep phase.
+      responses:
+        '200':
+          description: Sleep architecture
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cycles:
+                            type: integer
+                          stages:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                stage:
+                                  type: string
+                                  enum: [light, deep, rem, awake]
+                                start:
+                                  type: string
+                                end:
+                                  type: string
+                                duration:
+                                  type: integer
+                                  description: Duration in minutes
+                          deepPct:
+                            type: number
+                          remPct:
+                            type: number
+                          lightPct:
+                            type: number
+                          awakePct:
+                            type: number
+
+  /sleep/consistency:
+    get:
+      tags: [Sleep]
+      summary: Get sleep consistency metrics
+      description: Returns sleep schedule consistency analysis including average bedtime/wake time, standard deviations, social jet lag, and an overall consistency score.
+      responses:
+        '200':
+          description: Sleep consistency data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          avgBedtime:
+                            type: string
+                            example: "23:20"
+                          avgWakeTime:
+                            type: string
+                            example: "07:05"
+                          stdDevBedtime:
+                            type: string
+                            example: 22min
+                          stdDevWakeTime:
+                            type: string
+                            example: 18min
+                          socialJetLag:
+                            type: string
+                            description: Difference between weekday and weekend sleep midpoints
+                          consistency:
+                            type: string
+                            enum: [excellent, good, fair, poor]
+                          score:
+                            type: number
+
+  /sleep/debt:
+    get:
+      tags: [Sleep]
+      summary: Get sleep debt
+      description: Returns accumulated sleep debt over the specified period, calculated as the difference between target and actual sleep duration. Includes a personalized recommendation.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 14d, 30d]
+            default: 7d
+      responses:
+        '200':
+          description: Sleep debt data
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          accumulatedDebt:
+                            type: integer
+                            description: Accumulated sleep debt in minutes
+                          unit:
+                            type: string
+                            example: minutes
+                          period:
+                            type: string
+                          dailyTarget:
+                            type: integer
+                            description: Target sleep duration in minutes
+                          dailyAvg:
+                            type: integer
+                            description: Average actual sleep duration in minutes
+                          recommendation:
+                            type: string
+
+  /sleep/phases:
+    get:
+      tags: [Sleep]
+      summary: Get detailed sleep phase timeline
+      description: Returns a detailed timeline of sleep phases with start/end times and durations for each phase segment, along with total cycle count and average cycle duration.
+      responses:
+        '200':
+          description: Sleep phase timeline
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          date:
+                            type: string
+                            format: date
+                          phases:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                phase:
+                                  type: string
+                                  enum: [light, deep, rem, awake]
+                                start:
+                                  type: string
+                                end:
+                                  type: string
+                                durationMin:
+                                  type: integer
+                          totalCycles:
+                            type: integer
+                          avgCycleDuration:
+                            type: integer
+                            description: Average cycle duration in minutes
+
+  /sleep/optimal-window:
+    get:
+      tags: [Sleep]
+      summary: Get optimal sleep window
+      description: Returns the recommended bedtime and wake time based on the user's circadian HRV pattern and sleep consistency data. Includes chronotype classification and estimated melatonin onset time.
+      responses:
+        '200':
+          description: Optimal sleep window
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          recommendedBedtime:
+                            type: string
+                            example: "23:00"
+                          recommendedWakeTime:
+                            type: string
+                            example: "07:00"
+                          chronotype:
+                            type: string
+                            enum: [early, intermediate, late]
+                          melatoninOnsetEstimate:
+                            type: string
+                            example: "22:30"
+                          reason:
+                            type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # AI
+  # ════════════════════════════════════════════════════════════════
+  /ai/interpret:
+    get:
+      tags: [AI]
+      summary: Get AI interpretation of current health data
+      description: Returns a natural-language interpretation of the current WVI score and biometric data from 8 expert perspectives (doctor, psychologist, neuroscientist, biohacker, coach, nutritionist, sleep expert, data scientist).
+      responses:
+        '200':
+          description: AI interpretation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          wviScore:
+                            type: number
+                          interpretation:
+                            type: string
+                          perspectives:
+                            type: object
+                            properties:
+                              doctor:
+                                type: string
+                              psychologist:
+                                type: string
+                              neuroscientist:
+                                type: string
+                              biohacker:
+                                type: string
+                              coach:
+                                type: string
+                              nutritionist:
+                                type: string
+                              sleepExpert:
+                                type: string
+                              dataScientist:
+                                type: string
+
+  /ai/recommendations:
+    get:
+      tags: [AI]
+      summary: Get AI recommendations
+      description: Returns prioritized actionable recommendations based on current biometric data and trends. Each recommendation includes an expected WVI impact score.
+      responses:
+        '200':
+          description: AI recommendations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          recommendations:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                priority:
+                                  type: integer
+                                category:
+                                  type: string
+                                  enum: [activity, sleep, stress, nutrition, recovery, general]
+                                text:
+                                  type: string
+                                impact:
+                                  type: string
+                                  description: Expected WVI score change
+
+  /ai/chat:
+    post:
+      tags: [AI]
+      summary: Chat with AI health assistant
+      description: Send a natural-language question about your health data and receive an AI-generated response with relevant context from your biometric data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  example: How can I improve my WVI score?
+      responses:
+        '200':
+          description: AI chat response
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          response:
+                            type: string
+                          context:
+                            type: object
+                            properties:
+                              wviScore:
+                                type: number
+                              emotion:
+                                type: string
+                              activity:
+                                type: string
+
+  /ai/explain-metric:
+    get:
+      tags: [AI]
+      summary: Get AI metric explanation
+      description: Returns an AI-generated explanation of a specific biometric metric, its current value, what it means, and how it compares to population averages.
+      parameters:
+        - name: metric
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [hr, hrv, stress, spo2, temperature, sleep, activity, bloodPressure, ppiCoherence]
+          description: The metric to explain
+      responses:
+        '200':
+          description: Metric explanation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          metric:
+                            type: string
+                          value:
+                            type: number
+                          unit:
+                            type: string
+                          explanation:
+                            type: string
+                          percentile:
+                            type: integer
+                            description: Percentile rank in population
+                          population:
+                            type: string
+                            description: Reference population group
+    post:
+      tags: [AI]
+      summary: Explain a specific metric value
+      description: Provides a detailed AI explanation of why a specific metric is at a given value, with personal comparisons, population percentile, recommendations, and scientific references.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [metric]
+              properties:
+                metric:
+                  type: string
+                  example: hrv
+                value:
+                  type: number
+                  example: 48
+      responses:
+        '200':
+          description: Detailed metric explanation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          metric:
+                            type: string
+                          value:
+                            type: number
+                          explanation:
+                            type: string
+                          comparisons:
+                            type: object
+                            properties:
+                              personalAvg:
+                                type: number
+                              populationAvg:
+                                type: number
+                              personalBest:
+                                type: number
+                              personalWorst:
+                                type: number
+                              percentile:
+                                type: integer
+                          recommendations:
+                            type: array
+                            items:
+                              type: string
+                          references:
+                            type: array
+                            items:
+                              type: string
+
+  /ai/action-plan:
+    post:
+      tags: [AI]
+      summary: Generate AI action plan
+      description: Creates a personalized daily action plan with timed activities designed to improve the WVI score toward a specified goal. Each action includes the target metric and expected impact.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                goal:
+                  type: string
+                  example: Reach WVI 85+
+                timeframe:
+                  type: string
+                  example: 7 days
+      responses:
+        '200':
+          description: Generated action plan
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          plan:
+                            type: object
+                            properties:
+                              goal:
+                                type: string
+                              actions:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    time:
+                                      type: string
+                                    action:
+                                      type: string
+                                    metric:
+                                      type: string
+                                    expectedImpact:
+                                      type: string
+                              estimatedDays:
+                                type: integer
+
+  /ai/insights:
+    get:
+      tags: [AI]
+      summary: Get AI-generated insights
+      description: Returns pattern discoveries, anomaly alerts, and streak notifications derived from analyzing biometric data over time. Each insight includes a confidence score.
+      responses:
+        '200':
+          description: AI insights
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          insights:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                  enum: [pattern, anomaly, streak, correlation]
+                                text:
+                                  type: string
+                                confidence:
+                                  type: number
+
+  /ai/genius-layer:
+    get:
+      tags: [AI]
+      summary: Get Genius Layer multi-perspective synthesis
+      description: Returns a synthesized analysis from all 8 expert AI perspectives with a consensus summary and overall confidence score. This is the highest-level AI interpretation available.
+      responses:
+        '200':
+          description: Genius Layer synthesis
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          layer:
+                            type: string
+                          perspectives:
+                            type: array
+                            items:
+                              type: string
+                          synthesis:
+                            type: string
+                          confidenceScore:
+                            type: number
+
+  # ════════════════════════════════════════════════════════════════
+  # REPORTS
+  # ════════════════════════════════════════════════════════════════
+  /reports/generate:
+    post:
+      tags: [Reports]
+      summary: Generate a new report
+      description: Queues generation of a wellness report in the specified format. Returns a report ID that can be used to check status and download when ready.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templateId:
+                  type: string
+                  example: tpl_daily
+                format:
+                  type: string
+                  enum: [pdf, html, slides]
+                  default: pdf
+                period:
+                  type: string
+                  example: 2026-04-01/2026-04-02
+      responses:
+        '201':
+          description: Report generation started
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          reportId:
+                            type: string
+                          format:
+                            type: string
+                          status:
+                            type: string
+                            enum: [generating, ready, failed]
+                          estimatedTime:
+                            type: string
+                          createdAt:
+                            type: string
+                            format: date-time
+
+  /reports/list:
+    get:
+      tags: [Reports]
+      summary: List generated reports
+      description: Returns a list of all generated reports with their status, format, and date.
+      responses:
+        '200':
+          description: Report list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          reports:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                id:
+                                  type: string
+                                title:
+                                  type: string
+                                format:
+                                  type: string
+                                date:
+                                  type: string
+                                  format: date
+                                status:
+                                  type: string
+                                  enum: [generating, ready, failed]
+
+  /reports/templates:
+    get:
+      tags: [Reports]
+      summary: List report templates
+      description: Returns available report templates that can be used with the report generation endpoint.
+      responses:
+        '200':
+          description: Report templates
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          templates:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                id:
+                                  type: string
+                                name:
+                                  type: string
+                                format:
+                                  type: string
+
+  /reports/{id}:
+    get:
+      tags: [Reports]
+      summary: Get report details
+      description: Returns metadata and download URL for a specific generated report.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Report ID
+      responses:
+        '200':
+          description: Report details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          title:
+                            type: string
+                          format:
+                            type: string
+                          date:
+                            type: string
+                            format: date
+                          status:
+                            type: string
+                          downloadUrl:
+                            type: string
+                          pages:
+                            type: integer
+                          generatedAt:
+                            type: string
+                            format: date-time
+    delete:
+      tags: [Reports]
+      summary: Delete a report
+      description: Permanently deletes a generated report.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Report ID
+      responses:
+        '200':
+          description: Report deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          deleted:
+                            type: boolean
+
+  /reports/{id}/download:
+    get:
+      tags: [Reports]
+      summary: Download a report
+      description: Returns a time-limited download URL for the specified report file.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Report ID
+      responses:
+        '200':
+          description: Download URL
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          downloadUrl:
+                            type: string
+                          expiresAt:
+                            type: string
+                            format: date-time
+                          format:
+                            type: string
+                          sizeBytes:
+                            type: integer
+
+  # ════════════════════════════════════════════════════════════════
+  # ALERTS
+  # ════════════════════════════════════════════════════════════════
+  /alerts/list:
+    get:
+      tags: [Alerts]
+      summary: List all alerts
+      description: Returns all alerts (both acknowledged and unacknowledged) with their severity level, triggering metric, value, and threshold.
+      responses:
+        '200':
+          description: Alert list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          alerts:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Alert'
+
+  /alerts/active:
+    get:
+      tags: [Alerts]
+      summary: Get active (unacknowledged) alerts
+      description: Returns only alerts that have not been acknowledged. These require user attention.
+      responses:
+        '200':
+          description: Active alerts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          count:
+                            type: integer
+                          alerts:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Alert'
+
+  /alerts/settings:
+    get:
+      tags: [Alerts]
+      summary: Get alert settings
+      description: Returns current alert threshold configuration and notification channel settings.
+      responses:
+        '200':
+          description: Alert settings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AlertSettings'
+    put:
+      tags: [Alerts]
+      summary: Update alert settings
+      description: Updates alert thresholds and notification channel preferences. Only provided fields are updated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertSettings'
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          updated:
+                            type: boolean
+                          updatedAt:
+                            type: string
+                            format: date-time
+
+  /alerts/history:
+    get:
+      tags: [Alerts]
+      summary: Get alert history
+      description: Returns historical alerts over the specified period including total count and alert details.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d, 90d]
+            default: 7d
+      responses:
+        '200':
+          description: Alert history
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          total:
+                            type: integer
+                          alerts:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Alert'
+
+  /alerts/{id}/acknowledge:
+    post:
+      tags: [Alerts]
+      summary: Acknowledge an alert
+      description: Marks an alert as acknowledged, removing it from the active alerts list. Records the acknowledgment timestamp.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Alert ID
+      responses:
+        '200':
+          description: Alert acknowledged
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          acknowledged:
+                            type: boolean
+                          acknowledgedAt:
+                            type: string
+                            format: date-time
+
+  /alerts/stats:
+    get:
+      tags: [Alerts]
+      summary: Get alert statistics
+      description: Returns aggregate alert statistics over the specified period, broken down by severity level and triggering metric. Includes average response time.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, 90d]
+            default: 30d
+      responses:
+        '200':
+          description: Alert statistics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          period:
+                            type: string
+                          total:
+                            type: integer
+                          byLevel:
+                            type: object
+                            additionalProperties:
+                              type: integer
+                          byMetric:
+                            type: object
+                            additionalProperties:
+                              type: integer
+                          avgResponseTime:
+                            type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # DEVICE
+  # ════════════════════════════════════════════════════════════════
+  /device/status:
+    get:
+      tags: [Device]
+      summary: Get device status
+      description: Returns the connected wearable device status including model, firmware version, battery level, connection state, signal strength, and uptime.
+      responses:
+        '200':
+          description: Device status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          deviceId:
+                            type: string
+                          model:
+                            type: string
+                          firmware:
+                            type: string
+                          battery:
+                            type: integer
+                            description: Battery level percentage
+                          connected:
+                            type: boolean
+                          lastSync:
+                            type: string
+                            format: date-time
+                          signal:
+                            type: string
+                            enum: [strong, good, weak, disconnected]
+                          uptime:
+                            type: string
+
+  /device/auto-monitoring:
+    get:
+      tags: [Device]
+      summary: Get auto-monitoring settings
+      description: Returns the device auto-monitoring configuration including sampling interval, tracked metrics, and night mode settings.
+      responses:
+        '200':
+          description: Auto-monitoring settings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          enabled:
+                            type: boolean
+                          interval:
+                            type: integer
+                            description: Sampling interval in seconds
+                          metrics:
+                            type: array
+                            items:
+                              type: string
+                          nightMode:
+                            type: boolean
+                          nightInterval:
+                            type: integer
+                            description: Night mode sampling interval in seconds
+    put:
+      tags: [Device]
+      summary: Update auto-monitoring settings
+      description: Updates the device auto-monitoring configuration. Changes take effect on the next device sync.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                interval:
+                  type: integer
+                metrics:
+                  type: array
+                  items:
+                    type: string
+                nightMode:
+                  type: boolean
+                nightInterval:
+                  type: integer
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          updated:
+                            type: boolean
+                          updatedAt:
+                            type: string
+                            format: date-time
+
+  /device/sync:
+    post:
+      tags: [Device]
+      summary: Trigger device sync
+      description: Initiates a data synchronization with the connected wearable device. Returns a sync ID for tracking progress.
+      responses:
+        '200':
+          description: Sync started
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          syncId:
+                            type: string
+                          status:
+                            type: string
+                            enum: [started, in_progress, completed, failed]
+                          estimatedRecords:
+                            type: integer
+
+  /device/capabilities:
+    get:
+      tags: [Device]
+      summary: Get device capabilities
+      description: Returns the hardware sensors, supported biometric metrics, sample rates, and features of the connected wearable device.
+      responses:
+        '200':
+          description: Device capabilities
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          sensors:
+                            type: array
+                            items:
+                              type: string
+                          metrics:
+                            type: array
+                            items:
+                              type: string
+                          sampleRates:
+                            type: object
+                            additionalProperties:
+                              type: integer
+                            description: Sensor name to sample rate (Hz)
+                          features:
+                            type: array
+                            items:
+                              type: string
+
+  /device/measure:
+    post:
+      tags: [Device]
+      summary: Start on-demand measurement
+      description: Triggers an on-demand measurement on the wearable device (e.g., spot ECG, manual SpO2 check). Returns a measurement ID for tracking.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  enum: [ecg, spo2, blood_pressure, temperature]
+                  description: Type of measurement to perform
+      responses:
+        '200':
+          description: Measurement started
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          measurementId:
+                            type: string
+                          type:
+                            type: string
+                          status:
+                            type: string
+                            enum: [started, in_progress, completed, failed]
+                          estimatedDuration:
+                            type: string
+                          startedAt:
+                            type: string
+                            format: date-time
+
+  /device/firmware:
+    get:
+      tags: [Device]
+      summary: Get firmware information
+      description: Returns current firmware version, latest available version, update availability, release notes, and download URL.
+      responses:
+        '200':
+          description: Firmware info
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          currentVersion:
+                            type: string
+                          latestVersion:
+                            type: string
+                          updateAvailable:
+                            type: boolean
+                          releaseNotes:
+                            type: string
+                          updateUrl:
+                            type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # TRAINING
+  # ════════════════════════════════════════════════════════════════
+  /training/recommendation:
+    get:
+      tags: [Training]
+      summary: Get training recommendation
+      description: Returns a personalized training recommendation based on recovery score, acute-to-chronic load ratio, and current readiness. Includes suggested activity types and target duration.
+      responses:
+        '200':
+          description: Training recommendation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TrainingRecommendation'
+
+  /training/weekly-plan:
+    get:
+      tags: [Training]
+      summary: Get weekly training plan
+      description: Returns a 7-day training plan with activity types and durations for each day, along with total and target weekly load.
+      responses:
+        '200':
+          description: Weekly training plan
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          week:
+                            type: string
+                          plan:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                day:
+                                  type: string
+                                type:
+                                  type: string
+                                duration:
+                                  type: integer
+                                  description: Duration in minutes
+                          totalLoad:
+                            type: integer
+                          targetLoad:
+                            type: integer
+
+  /training/overtraining-risk:
+    get:
+      tags: [Training]
+      summary: Get overtraining risk assessment
+      description: Evaluates overtraining risk based on acute-to-chronic load ratio, HRV trend, resting HR trend, sleep quality, and subjective fatigue. Returns a risk score (0-100) and detailed factor analysis.
+      responses:
+        '200':
+          description: Overtraining risk
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          risk:
+                            type: string
+                            enum: [low, moderate, high, critical]
+                          score:
+                            type: number
+                          factors:
+                            type: object
+                            properties:
+                              acuteChronicRatio:
+                                type: number
+                              hrvTrend:
+                                type: string
+                              restingHrTrend:
+                                type: string
+                              sleepQuality:
+                                type: number
+                              subjectiveFatigue:
+                                type: number
+                                nullable: true
+                          recommendation:
+                            type: string
+
+  /training/optimal-time:
+    get:
+      tags: [Training]
+      summary: Get optimal training time
+      description: Returns the optimal time window for training based on HRV circadian pattern and cortisol levels, along with an alternative window and a period to avoid.
+      responses:
+        '200':
+          description: Optimal training time
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          optimalWindow:
+                            type: object
+                            properties:
+                              start:
+                                type: string
+                              end:
+                                type: string
+                          reason:
+                            type: string
+                          alternativeWindow:
+                            type: object
+                            properties:
+                              start:
+                                type: string
+                              end:
+                                type: string
+                          avoidWindow:
+                            type: object
+                            properties:
+                              start:
+                                type: string
+                              end:
+                                type: string
+                              reason:
+                                type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # RISK
+  # ════════════════════════════════════════════════════════════════
+  /risk/assessment:
+    get:
+      tags: [Risk]
+      summary: Get overall risk assessment
+      description: Returns a comprehensive health risk assessment with an overall risk level, composite score, and individual risk factor analysis across cardiovascular, metabolic, mental health, and musculoskeletal categories.
+      responses:
+        '200':
+          description: Risk assessment
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RiskAssessment'
+
+  /risk/anomalies:
+    get:
+      tags: [Risk]
+      summary: Get detected anomalies
+      description: Returns biometric anomalies detected via statistical deviation analysis. Each anomaly includes the observed value, expected value, standard deviation, and severity.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 7d
+      responses:
+        '200':
+          description: Detected anomalies
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          anomalies:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                metric:
+                                  type: string
+                                value:
+                                  type: number
+                                expected:
+                                  type: number
+                                deviation:
+                                  type: number
+                                  description: Number of standard deviations from expected
+                                severity:
+                                  type: string
+                                  enum: [mild, moderate, severe]
+                                at:
+                                  type: string
+                                  format: date-time
+                          period:
+                            type: string
+                          totalDetected:
+                            type: integer
+
+  /risk/chronic-flags:
+    get:
+      tags: [Risk]
+      summary: Get chronic risk flags
+      description: Returns any persistent health risk patterns detected over a 90-day analysis window. Empty flags array indicates no chronic concerns.
+      responses:
+        '200':
+          description: Chronic risk flags
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          flags:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                flag:
+                                  type: string
+                                severity:
+                                  type: string
+                                duration:
+                                  type: string
+                                recommendation:
+                                  type: string
+                          message:
+                            type: string
+                          lastAssessed:
+                            type: string
+                            format: date-time
+
+  /risk/correlations:
+    get:
+      tags: [Risk]
+      summary: Get risk factor correlations
+      description: Returns pairwise correlations between risk factors with Pearson coefficients and clinical relevance ratings. Helps identify which risk factors tend to occur together.
+      responses:
+        '200':
+          description: Risk correlations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          correlations:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                factorA:
+                                  type: string
+                                factorB:
+                                  type: string
+                                r:
+                                  type: number
+                                  description: Pearson correlation coefficient
+                                clinicalRelevance:
+                                  type: string
+                                  enum: [low, moderate, high]
+
+  /risk/volatility:
+    get:
+      tags: [Risk]
+      summary: Get metric volatility analysis
+      description: Returns the standard deviation of WVI scores and individual metrics over the specified period. Lower volatility indicates more stable health patterns.
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, 90d]
+            default: 30d
+      responses:
+        '200':
+          description: Volatility analysis
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          wviVolatility:
+                            type: number
+                          unit:
+                            type: string
+                            example: points
+                          period:
+                            type: string
+                          classification:
+                            type: string
+                            enum: [very_stable, stable, moderate, volatile, highly_volatile]
+                          metricVolatility:
+                            type: object
+                            additionalProperties:
+                              type: number
+
+  # ════════════════════════════════════════════════════════════════
+  # DASHBOARD
+  # ════════════════════════════════════════════════════════════════
+  /dashboard/widgets:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard widgets
+      description: Returns a pre-configured set of dashboard widgets with current values, suitable for rendering a health dashboard UI.
+      responses:
+        '200':
+          description: Dashboard widgets
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          widgets:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                id:
+                                  type: string
+                                type:
+                                  type: string
+                                  enum: [gauge, sparkline, badge, ring, bar]
+                                title:
+                                  type: string
+                                value:
+                                  oneOf:
+                                    - type: number
+                                    - type: string
+                                max:
+                                  type: number
+                                current:
+                                  type: number
+                                data:
+                                  type: array
+                                  items:
+                                    type: number
+                                steps:
+                                  type: integer
+                                goal:
+                                  type: integer
+
+  /dashboard/daily-brief:
+    get:
+      tags: [Dashboard]
+      summary: Get morning daily brief
+      description: Returns a personalized morning briefing with a greeting, summary of last night's sleep, current WVI, key highlights, and the top recommendation for the day.
+      responses:
+        '200':
+          description: Daily brief
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          date:
+                            type: string
+                            format: date
+                          greeting:
+                            type: string
+                          summary:
+                            type: string
+                          highlights:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                icon:
+                                  type: string
+                                text:
+                                  type: string
+                          topRecommendation:
+                            type: string
+
+  /dashboard/evening-review:
+    get:
+      tags: [Dashboard]
+      summary: Get evening review
+      description: Returns an end-of-day review with aggregate metrics, achievements, dominant emotion, and a tip for tomorrow.
+      responses:
+        '200':
+          description: Evening review
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          date:
+                            type: string
+                            format: date
+                          summary:
+                            type: string
+                          metrics:
+                            type: object
+                            properties:
+                              wviAvg:
+                                type: number
+                              wviPeak:
+                                type: number
+                              steps:
+                                type: integer
+                              activeMinutes:
+                                type: integer
+                              stressAvg:
+                                type: number
+                              dominantEmotion:
+                                type: string
+                          achievements:
+                            type: array
+                            items:
+                              type: string
+                          tomorrowTip:
+                            type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # EXPORT
+  # ════════════════════════════════════════════════════════════════
+  /export/csv:
+    get:
+      tags: [Export]
+      summary: Export data as CSV
+      description: Downloads biometric and WVI data as a CSV file. The response has Content-Type text/csv and Content-Disposition attachment header.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+      responses:
+        '200':
+          description: CSV file download
+          content:
+            text/csv:
+              schema:
+                type: string
+
+  /export/json:
+    get:
+      tags: [Export]
+      summary: Export data as JSON
+      description: Returns biometric and WVI data as a structured JSON export with date, WVI score, and key metrics for each day.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+      responses:
+        '200':
+          description: JSON export
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          exportDate:
+                            type: string
+                            format: date-time
+                          format:
+                            type: string
+                          records:
+                            type: integer
+                          data:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                date:
+                                  type: string
+                                  format: date
+                                wviScore:
+                                  type: number
+                                hrAvg:
+                                  type: integer
+                                hrvRmssd:
+                                  type: number
+                                stress:
+                                  type: number
+                                spo2:
+                                  type: number
+                                sleepScore:
+                                  type: number
+                                steps:
+                                  type: integer
+
+  /export/health-summary:
+    get:
+      tags: [Export]
+      summary: Export health summary report
+      description: Generates and returns a comprehensive health summary for the specified period, including average metrics, quality assessments, risk level, and a download URL for the PDF version.
+      parameters:
+        - $ref: '#/components/parameters/from'
+        - $ref: '#/components/parameters/to'
+      responses:
+        '200':
+          description: Health summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          format:
+                            type: string
+                          status:
+                            type: string
+                          summary:
+                            type: object
+                            properties:
+                              period:
+                                type: string
+                              avgWvi:
+                                type: number
+                              avgHr:
+                                type: integer
+                              avgHrv:
+                                type: number
+                              avgStress:
+                                type: number
+                              sleepQuality:
+                                type: string
+                              activityLevel:
+                                type: string
+                              riskAssessment:
+                                type: string
+                              recommendation:
+                                type: string
+                          downloadUrl:
+                            type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # SETTINGS
+  # ════════════════════════════════════════════════════════════════
+  /settings:
+    get:
+      tags: [Settings]
+      summary: Get application settings
+      description: Returns the user's application settings including units, language, timezone, theme, data retention policy, and privacy preferences.
+      responses:
+        '200':
+          description: Application settings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AppSettings'
+    put:
+      tags: [Settings]
+      summary: Update application settings
+      description: Updates application settings. Only provided fields are modified.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppSettings'
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          updated:
+                            type: boolean
+                          updatedAt:
+                            type: string
+                            format: date-time
+
+  /settings/notifications:
+    get:
+      tags: [Settings]
+      summary: Get notification settings
+      description: Returns notification preferences including channel toggles, quiet hours, and alert level filters.
+      responses:
+        '200':
+          description: Notification settings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NotificationSettings'
+    put:
+      tags: [Settings]
+      summary: Update notification settings
+      description: Updates notification preferences. Only provided fields are modified.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationSettings'
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          updated:
+                            type: boolean
+                          updatedAt:
+                            type: string
+                            format: date-time
+
+  # ════════════════════════════════════════════════════════════════
+  # HEALTH
+  # ════════════════════════════════════════════════════════════════
+  /health/server-status:
+    get:
+      tags: [Health]
+      summary: Server health check
+      description: Returns server status, uptime, timestamp, version, and environment. This endpoint does not require authentication.
+      security: []
+      responses:
+        '200':
+          description: Server healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  uptime:
+                    type: number
+                    description: Server uptime in seconds
+                  timestamp:
+                    type: string
+                    format: date-time
+                  version:
+                    type: string
+                    example: 1.0.0
+                  environment:
+                    type: string
+
+  /health/api-version:
+    get:
+      tags: [Health]
+      summary: Get API version info
+      description: Returns API name, version, OpenAPI spec version, total endpoint count, and documentation URL. This endpoint does not require authentication.
+      security: []
+      responses:
+        '200':
+          description: API version info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api:
+                    type: string
+                  version:
+                    type: string
+                  openapi:
+                    type: string
+                  endpoints:
+                    type: integer
+                  docsUrl:
+                    type: string
+
+  # ════════════════════════════════════════════════════════════════
+  # DOCS
+  # ════════════════════════════════════════════════════════════════
+  /docs.json:
+    get:
+      tags: [Health]
+      summary: Get OpenAPI spec as JSON
+      description: Returns the full OpenAPI specification document in JSON format. This endpoint does not require authentication.
+      security: []
+      responses:
+        '200':
+          description: OpenAPI specification
+          content:
+            application/json:
+              schema:
+                type: object
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Privy JWT access token. Obtain via /auth/login or /auth/register.
+
+  parameters:
+    from:
+      name: from
+      in: query
+      schema:
+        type: string
+        format: date-time
+      description: Start of date range (ISO 8601)
+    to:
+      name: to
+      in: query
+      schema:
+        type: string
+        format: date-time
+      description: End of date range (ISO 8601)
+    granularity:
+      name: granularity
+      in: query
+      schema:
+        type: string
+        enum: [minute, hour, day]
+        default: hour
+      description: Data aggregation granularity
+
+  schemas:
+    ApiResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+
+    AuthResponse:
+      type: object
+      properties:
+        userId:
+          type: string
+          example: usr_abc123
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        accessToken:
+          type: string
+          description: JWT access token for Bearer authentication
+        refreshToken:
+          type: string
+          description: Token used to obtain a new access token
+        expiresIn:
+          type: integer
+          description: Access token lifetime in seconds
+          example: 3600
+
+    UserProfile:
+      type: object
+      properties:
+        userId:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        age:
+          type: integer
+        gender:
+          type: string
+          enum: [male, female, other]
+        height:
+          type: integer
+          description: Height in centimeters
+        weight:
+          type: integer
+          description: Weight in kilograms
+        createdAt:
+          type: string
+          format: date-time
+
+    PersonalNorms:
+      type: object
+      description: User's personal biometric baselines used for WVI calculation and alert thresholds
+      properties:
+        hr:
+          type: object
+          properties:
+            min:
+              type: integer
+              example: 55
+            max:
+              type: integer
+              example: 85
+            resting:
+              type: integer
+              example: 62
+        hrv:
+          type: object
+          properties:
+            min:
+              type: number
+              example: 35
+            max:
+              type: number
+              example: 120
+            baseline:
+              type: number
+              example: 68
+        spo2:
+          type: object
+          properties:
+            min:
+              type: number
+              example: 95
+            max:
+              type: number
+              example: 100
+        temperature:
+          type: object
+          properties:
+            min:
+              type: number
+              example: 36.1
+            max:
+              type: number
+              example: 37.2
+        stress:
+          type: object
+          properties:
+            low:
+              type: number
+              example: 25
+            high:
+              type: number
+              example: 70
+        bloodPressure:
+          type: object
+          properties:
+            systolicMin:
+              type: integer
+              example: 100
+            systolicMax:
+              type: integer
+              example: 130
+            diastolicMin:
+              type: integer
+              example: 60
+            diastolicMax:
+              type: integer
+              example: 85
+
+    BiometricSyncRequest:
+      type: object
+      properties:
+        deviceId:
+          type: string
+        records:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [heart_rate, hrv, spo2, temperature, sleep, ppi, ecg, activity]
+              timestamp:
+                type: string
+                format: date-time
+              data:
+                type: object
+
+    BiometricSyncResult:
+      type: object
+      properties:
+        syncId:
+          type: string
+        recordsReceived:
+          type: integer
+        recordsProcessed:
+          type: integer
+        duration:
+          type: string
+        lastSyncAt:
+          type: string
+          format: date-time
+
+    BiometricUploadRequest:
+      type: object
+      properties:
+        records:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              value:
+                type: number
+          description: Array of timestamped measurement records
+
+    BiometricUploadResult:
+      type: object
+      properties:
+        message:
+          type: string
+        recordsSaved:
+          type: integer
+        type:
+          type: string
+
+    TimeSeriesPoint:
+      type: object
+      properties:
+        ts:
+          type: string
+          format: date-time
+        value:
+          type: number
+
+    WVISnapshot:
+      type: object
+      description: Complete WVI snapshot including the score breakdown, detected emotion, and detected activity
+      properties:
+        wvi:
+          type: object
+          properties:
+            wviScore:
+              type: number
+              description: Overall Wellness Vitality Index score (0-100)
+              example: 78.5
+            level:
+              type: string
+              enum: [superb, excellent, good, moderate, attention, critical, dangerous]
+              description: Human-readable WVI level
+            metrics:
+              type: object
+              description: Individual metric sub-scores (0-100)
+              properties:
+                heartRate:
+                  type: number
+                hrv:
+                  type: number
+                stress:
+                  type: number
+                spo2:
+                  type: number
+                temperature:
+                  type: number
+                sleep:
+                  type: number
+                activity:
+                  type: number
+                bloodPressure:
+                  type: number
+                ppiCoherence:
+                  type: number
+                emotionalWellbeing:
+                  type: number
+            weights:
+              type: object
+              description: Weight of each metric in the WVI formula (sums to 1.0)
+              additionalProperties:
+                type: number
+            emotionFeedback:
+              type: object
+              description: How the detected emotion affected the WVI score
+              properties:
+                emotion:
+                  type: string
+                multiplier:
+                  type: number
+                rawWVI:
+                  type: number
+                  description: WVI score before emotion adjustment
+        emotion:
+          $ref: '#/components/schemas/EmotionResult'
+        activity:
+          $ref: '#/components/schemas/ActivityResult'
+
+    EmotionResult:
+      type: object
+      description: Emotion detection result from the biometric emotion engine. Detects one of 18 emotions based on HR, HRV, stress, SpO2, temperature, coherence, and time-of-day signals.
+      properties:
+        primary:
+          type: string
+          enum: [calm, relaxed, joyful, energized, excited, focused, meditative, recovering, drowsy, stressed, anxious, angry, frustrated, fearful, sad, exhausted, pain, flow]
+          description: Primary detected emotion (highest confidence)
+        primaryConfidence:
+          type: number
+          description: Confidence score for primary emotion (0-1)
+          example: 0.82
+        secondary:
+          type: string
+          description: Second most likely emotion
+        secondaryConfidence:
+          type: number
+          description: Confidence score for secondary emotion (0-1)
+        emoji:
+          type: string
+          description: Emoji representation of the primary emotion
+          example: "\U0001F60C"
+        category:
+          type: string
+          enum: [positive, neutral, negative, physiological]
+          description: Broad emotional category
+        label:
+          type: string
+          description: Human-readable label for the emotion state
+        allScores:
+          type: array
+          description: Confidence scores for all 18 emotions, sorted by score descending
+          items:
+            type: object
+            properties:
+              emotion:
+                type: string
+              score:
+                type: number
+        timestamp:
+          type: string
+          format: date-time
+
+    ActivityType:
+      type: string
+      description: |
+        64 detectable activity types grouped by category:
+        Sleep: deep_sleep, light_sleep, rem_sleep, nap, falling_asleep
+        Rest: resting, sitting_relaxed, sitting_working, standing, lying_awake, phone_scrolling, watching_screen
+        Walking: stroll, walk_normal, walk_brisk, hiking, nordic_walking
+        Running: jogging, run_tempo, run_interval, sprinting, trail_running
+        Cardio Machine: cycling, stationary_bike, elliptical, rowing
+        Strength: weight_training, bodyweight, crossfit, hiit, circuit_training
+        Mind-Body: yoga_vinyasa, yoga_hot, pilates, stretching, meditation
+        Sports: football, basketball, tennis, badminton, swimming, martial_arts, dancing
+        Daily: housework, cooking, driving, commuting, shopping, eating
+        Physiological: stress_event, panic_attack, crying, laughing, pain_episode, illness, intimacy
+        Recovery: warm_up, cool_down, active_recovery, passive_recovery
+        Mental: deep_work, presentation, exam, creative_flow
+      enum:
+        - deep_sleep
+        - light_sleep
+        - rem_sleep
+        - nap
+        - falling_asleep
+        - resting
+        - sitting_relaxed
+        - sitting_working
+        - standing
+        - lying_awake
+        - phone_scrolling
+        - watching_screen
+        - stroll
+        - walk_normal
+        - walk_brisk
+        - hiking
+        - nordic_walking
+        - jogging
+        - run_tempo
+        - run_interval
+        - sprinting
+        - trail_running
+        - cycling
+        - stationary_bike
+        - elliptical
+        - rowing
+        - weight_training
+        - bodyweight
+        - crossfit
+        - hiit
+        - circuit_training
+        - yoga_vinyasa
+        - yoga_hot
+        - pilates
+        - stretching
+        - meditation
+        - football
+        - basketball
+        - tennis
+        - badminton
+        - swimming
+        - martial_arts
+        - dancing
+        - housework
+        - cooking
+        - driving
+        - commuting
+        - shopping
+        - eating
+        - stress_event
+        - panic_attack
+        - crying
+        - laughing
+        - pain_episode
+        - illness
+        - intimacy
+        - warm_up
+        - cool_down
+        - active_recovery
+        - passive_recovery
+        - deep_work
+        - presentation
+        - exam
+        - creative_flow
+
+    ActivityCategory:
+      type: string
+      enum: [sleep, rest, walking, running, cardio_machine, strength, mind_body, sports, daily, physiological, recovery, mental]
+
+    LoadLevel:
+      type: string
+      description: "7 load levels from none (sleep/rest) to extreme (sprinting, HIIT)"
+      enum: [none, minimal, light, moderate, high, intense, extreme]
+
+    ActivityResult:
+      type: object
+      description: |
+        Full activity detection result from the cascade algorithm.
+        Auto-detects what the user is doing based on HR, steps, HRV, stress, SpO2, temperature, PPI coherence.
+        Calculates load via Banister TRIMP formula, HR zone, and calories via METs.
+      properties:
+        type:
+          $ref: '#/components/schemas/ActivityType'
+        category:
+          $ref: '#/components/schemas/ActivityCategory'
+        emoji:
+          type: string
+          example: "\U0001F3C3"
+        confidence:
+          type: number
+          description: Detection confidence (0-1)
+          example: 0.85
+        loadLevel:
+          type: integer
+          description: "Load level 0-6 (0=none, 1=minimal, 2=light, 3=moderate, 4=high, 5=intense, 6=extreme)"
+          example: 3
+        loadLevelName:
+          $ref: '#/components/schemas/LoadLevel'
+        loadScore:
+          type: number
+          description: "TRIMP-based load score (0-100). Calculated via Banister formula: deltaHRratio * exp(b * deltaHRratio)"
+          example: 45.2
+        loadTarget:
+          type: string
+          description: What body system is being loaded
+          enum: [cardio, muscular, mental, mixed]
+          example: cardio
+        heartRateZone:
+          type: integer
+          description: "Current HR zone (0-5). 0=sub-threshold, 1=Recovery 50-60%, 2=Fat Burn 60-70%, 3=Aerobic 70-80%, 4=Anaerobic 80-90%, 5=VO2max 90-100%"
+          example: 3
+        heartRateZoneName:
+          type: string
+          enum: [Sub-threshold, Recovery, Fat Burn, Aerobic, Anaerobic, VO2max]
+        mets:
+          type: number
+          description: Metabolic Equivalent of Task
+          example: 7.0
+        caloriesPerMinute:
+          type: number
+          description: "Energy expenditure (kcal/min). Formula: METs * weight_kg * 3.5 / 200"
+          example: 9.19
+        isEmergency:
+          type: boolean
+          description: True for panic attacks, illness detection, or extreme values
+          example: false
+        alertMessage:
+          type: string
+          nullable: true
+          description: Emergency message if isEmergency is true
+        timestamp:
+          type: string
+          format: date-time
+
+    HeartRateRecord:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        bpm:
+          type: integer
+          example: 72
+        confidence:
+          type: number
+          example: 0.98
+        zone:
+          type: integer
+          description: HR zone (1-5)
+
+    HRVRecord:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        sdnn:
+          type: number
+          example: 48.5
+          description: Standard deviation of NN intervals (ms)
+        rmssd:
+          type: number
+          example: 42.3
+          description: Root mean square of successive differences (ms)
+        pnn50:
+          type: number
+          example: 18.2
+          description: Percentage of successive intervals differing by more than 50ms
+        lnRmssd:
+          type: number
+          example: 3.74
+        stress:
+          type: number
+          description: Derived stress index (0-100)
+        heartRate:
+          type: integer
+          description: Heart rate at time of measurement
+        systolicBP:
+          type: number
+          description: Estimated systolic blood pressure
+        diastolicBP:
+          type: number
+          description: Estimated diastolic blood pressure
+
+    SpO2Record:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        value:
+          type: number
+          example: 97.5
+          description: Blood oxygen saturation (%)
+        confidence:
+          type: number
+
+    TemperatureRecord:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        value:
+          type: number
+          example: 36.7
+          description: Body temperature (Celsius)
+        location:
+          type: string
+          enum: [wrist, skin]
+
+    PPIRecord:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        intervals:
+          type: array
+          items:
+            type: number
+          description: Peak-to-peak intervals in ms
+        rmssd:
+          type: number
+          description: RMSSD derived from PPI intervals (ms)
+        coherence:
+          type: number
+          description: Cardiac coherence score (0-100)
+
+    SleepRecord:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        bedtime:
+          type: string
+          format: date-time
+        wakeTime:
+          type: string
+          format: date-time
+        totalHours:
+          type: number
+          example: 7.5
+        sleepScore:
+          type: number
+          example: 82
+        efficiency:
+          type: number
+          example: 91
+          description: Sleep efficiency percentage
+        phases:
+          type: object
+          properties:
+            awake:
+              type: object
+              properties:
+                minutes:
+                  type: number
+                percentage:
+                  type: number
+            light:
+              type: object
+              properties:
+                minutes:
+                  type: number
+                percentage:
+                  type: number
+            deep:
+              type: object
+              properties:
+                minutes:
+                  type: number
+                percentage:
+                  type: number
+            rem:
+              type: object
+              properties:
+                minutes:
+                  type: number
+                percentage:
+                  type: number
+        avgHR:
+          type: integer
+        avgHRV:
+          type: number
+        avgSpO2:
+          type: number
+        respiratoryRate:
+          type: number
+        disturbances:
+          type: integer
+
+    ECGSession:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        durationSeconds:
+          type: integer
+        sampleRate:
+          type: integer
+          example: 130
+        samples:
+          type: array
+          items:
+            type: number
+          description: ECG waveform samples in microvolts
+        analysis:
+          type: object
+          properties:
+            heartRate:
+              type: integer
+            rhythm:
+              type: string
+              enum: [normal_sinus, atrial_fibrillation, other]
+            qrsWidth:
+              type: number
+            qtInterval:
+              type: number
+
+    Alert:
+      type: object
+      properties:
+        id:
+          type: string
+        level:
+          type: string
+          enum: [info, notice, warning, critical]
+        metric:
+          type: string
+        message:
+          type: string
+        value:
+          type: number
+        threshold:
+          type: number
+        at:
+          type: string
+          format: date-time
+        acknowledged:
+          type: boolean
+        acknowledgedAt:
+          type: string
+          format: date-time
+
+    AlertSettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        thresholds:
+          type: object
+          properties:
+            hr:
+              type: object
+              properties:
+                critical:
+                  type: object
+                  properties:
+                    min:
+                      type: integer
+                    max:
+                      type: integer
+                warning:
+                  type: object
+                  properties:
+                    min:
+                      type: integer
+                    max:
+                      type: integer
+            spo2:
+              type: object
+              properties:
+                critical:
+                  type: object
+                  properties:
+                    min:
+                      type: number
+                warning:
+                  type: object
+                  properties:
+                    min:
+                      type: number
+            stress:
+              type: object
+              properties:
+                warning:
+                  type: object
+                  properties:
+                    max:
+                      type: number
+                critical:
+                  type: object
+                  properties:
+                    max:
+                      type: number
+        channels:
+          type: array
+          items:
+            type: string
+            enum: [push, email, sms]
+
+    TrainingRecommendation:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [rest, light_activity, moderate_cardio, moderate_training, hard_training, competition_ready]
+        intensity:
+          type: string
+          enum: [rest, light, moderate, hard, maximal]
+        duration:
+          type: integer
+          description: Recommended duration in minutes
+        unit:
+          type: string
+          example: minutes
+        reason:
+          type: string
+        suggestedActivities:
+          type: array
+          items:
+            type: string
+        targetHRZone:
+          type: integer
+        readinessScore:
+          type: number
+
+    RiskAssessment:
+      type: object
+      properties:
+        overallRisk:
+          type: string
+          enum: [low, moderate, elevated, high, critical]
+        varScore:
+          type: number
+          description: Composite risk score (0-100)
+        confidence:
+          type: number
+        riskFactors:
+          type: array
+          items:
+            type: object
+            properties:
+              factor:
+                type: string
+              level:
+                type: string
+                enum: [low, moderate, elevated, high]
+              score:
+                type: number
+        assessedAt:
+          type: string
+          format: date-time
+
+    DailySummary:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        hr:
+          type: object
+          properties:
+            avg:
+              type: integer
+            min:
+              type: integer
+            max:
+              type: integer
+            resting:
+              type: integer
+        hrv:
+          type: object
+          properties:
+            avgRmssd:
+              type: number
+            avgSdnn:
+              type: number
+        spo2:
+          type: object
+          properties:
+            avg:
+              type: number
+            min:
+              type: number
+        stress:
+          type: object
+          properties:
+            avg:
+              type: number
+            max:
+              type: number
+        steps:
+          type: integer
+        calories:
+          type: integer
+        activeMinutes:
+          type: integer
+        sleepScore:
+          type: number
+
+    AppSettings:
+      type: object
+      properties:
+        units:
+          type: string
+          enum: [metric, imperial]
+        language:
+          type: string
+          example: en
+        timezone:
+          type: string
+          example: Europe/Moscow
+        theme:
+          type: string
+          enum: [light, dark, auto]
+        dataRetention:
+          type: string
+          example: 365d
+        privacy:
+          type: object
+          properties:
+            shareAnonymousData:
+              type: boolean
+            showInLeaderboard:
+              type: boolean
+
+    NotificationSettings:
+      type: object
+      properties:
+        push:
+          type: boolean
+        email:
+          type: boolean
+        sms:
+          type: boolean
+        quietHours:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            start:
+              type: string
+              example: "23:00"
+            end:
+              type: string
+              example: "07:00"
+        alertLevels:
+          type: object
+          properties:
+            critical:
+              type: boolean
+            warning:
+              type: boolean
+            info:
+              type: boolean
+            notice:
+              type: boolean
