@@ -6,11 +6,11 @@ use crate::error::AppResult;
 
 /// GET /emotions/current
 pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    let row = sqlx::query_as::<_, (String, Option<f32>, Option<String>, Option<f32>, chrono::DateTime<Utc>)>(
-        "SELECT primary_emotion, primary_confidence, secondary_emotion, secondary_confidence, timestamp FROM emotions WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1"
+    let row = sqlx::query_as::<_, (String, Option<f32>, Option<String>, Option<f32>, Option<serde_json::Value>, chrono::DateTime<Utc>)>(
+        "SELECT primary_emotion, primary_confidence, secondary_emotion, secondary_confidence, all_scores, timestamp FROM emotions WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1"
     ).bind(&user.privy_did).fetch_optional(&pool).await?;
     match row {
-        Some(r) => Ok(Json(serde_json::json!({ "success": true, "data": { "primary": r.0, "primaryConfidence": r.1, "secondary": r.2, "secondaryConfidence": r.3, "timestamp": r.4 } }))),
+        Some(r) => Ok(Json(serde_json::json!({ "success": true, "data": { "primary": r.0, "primaryConfidence": r.1, "secondary": r.2, "secondaryConfidence": r.3, "allScores": r.4, "timestamp": r.5 } }))),
         None => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
     }
 }
