@@ -728,8 +728,7 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
 
         // ── Auto-trigger WVI calculation ───────────────────────────────────────
         let wvi_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
-            use crate::wvi::models::RawMetrics;
-            use crate::wvi::calculator::WVICalculator;
+            use crate::wvi::calculator::{WviV2Calculator, WviV2Input};
 
             let hr = match latest_hr {
                 Some(v) => v,
@@ -765,7 +764,6 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
             let diastolic_bp_val = sqlx::query_scalar::<_, f32>(
                 "SELECT diastolic_bp FROM hrv WHERE user_id = $1 AND diastolic_bp IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
             ).bind(uid).fetch_optional(&pool).await.ok().flatten().unwrap_or(80.0) as f64;
-            let ppi_rmssd_val  = latest_ppi_rmssd.unwrap_or(hrv_val);
             let ppi_coherence_val = latest_ppi_coherence.unwrap_or(0.4);
             let steps_val = match latest_steps {
                 Some(v) => v,
@@ -777,40 +775,59 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
                 "SELECT total_hours, deep_percent, efficiency FROM sleep_records WHERE user_id = $1 ORDER BY date DESC LIMIT 1"
             ).bind(uid).fetch_optional(&pool).await.ok().flatten();
 
-            let raw = RawMetrics {
-                heart_rate: hr,
-                resting_hr: 65.0,
-                hrv: hrv_val,
-                stress: stress_val,
-                spo2: spo2_val,
-                temperature: temp_val,
-                base_temp: 36.6,
-                systolic_bp: systolic_bp_val,
-                diastolic_bp: diastolic_bp_val,
-                ppi_rmssd: ppi_rmssd_val,
-                ppi_coherence: ppi_coherence_val,
-                total_sleep_minutes: sleep_row.as_ref().and_then(|r| r.0).unwrap_or(7.0) as f64 * 60.0,
-                deep_sleep_percent: sleep_row.as_ref().and_then(|r| r.1).unwrap_or(20.0) as f64,
-                sleep_continuity: sleep_row.as_ref().and_then(|r| r.2).unwrap_or(85.0) as f64 / 100.0,
-                steps: steps_val,
-                active_minutes: 30.0,
-                mets: 1.5,
-                age: 35,
+            // Compute sleep score from components
+            let sleep_score = {
+                let total_hours = sleep_row.as_ref().and_then(|r| r.0).unwrap_or(7.0) as f64;
+                let deep_pct = sleep_row.as_ref().and_then(|r| r.1).unwrap_or(20.0) as f64;
+                let efficiency = sleep_row.as_ref().and_then(|r| r.2).unwrap_or(85.0) as f64;
+                let deep_s = if (15.0..=25.0).contains(&deep_pct) { 100.0 }
+                    else { (100.0 - (deep_pct - 20.0).abs() * 5.0).max(0.0) };
+                let dur_s = if (7.0..=9.0).contains(&total_hours) { 100.0 }
+                    else { (100.0 - (total_hours - 8.0).abs() * 20.0).max(0.0) };
+                let eff_s = (efficiency / 100.0 * 100.0).clamp(0.0, 100.0);
+                deep_s * 0.35 + dur_s * 0.40 + eff_s * 0.25
             };
 
-            let hour = Utc::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
-            let snapshot = WVICalculator::calculate(&raw, hour, false, None, 0.0);
+            // Fetch latest emotion name
+            let emotion_name = sqlx::query_scalar::<_, String>(
+                "SELECT primary_emotion FROM emotions WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
+            ).bind(uid).fetch_optional(&pool).await.ok().flatten().unwrap_or_default();
+
+            // Active calories from today
+            let active_calories = sqlx::query_scalar::<_, f32>(
+                "SELECT COALESCE(SUM(calories), 0)::float4 FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'"
+            ).bind(uid).fetch_optional(&pool).await.ok().flatten().unwrap_or(0.0) as f64;
+
+            let input = WviV2Input {
+                hrv_rmssd: hrv_val,
+                stress_index: stress_val,
+                sleep_score,
+                emotion_score: 50.0, // default during sync
+                spo2: spo2_val,
+                heart_rate: hr,
+                resting_hr: 65.0,
+                steps: steps_val,
+                active_calories,
+                acwr: 1.0, // default during sync
+                bp_systolic: systolic_bp_val,
+                bp_diastolic: diastolic_bp_val,
+                temp_delta: temp_val - 36.6,
+                ppi_coherence: ppi_coherence_val,
+                emotion_name,
+            };
+
+            let result = WviV2Calculator::calculate(&input);
 
             sqlx::query(
                 "INSERT INTO wvi_scores (user_id, timestamp, wvi_score, level, metrics, weights, emotion_feedback) \
                  VALUES ($1, NOW(), $2, $3, $4, $5, $6)"
             )
             .bind(uid)
-            .bind(snapshot.wvi_score as f32)
-            .bind(serde_json::to_string(&snapshot.level).unwrap_or_default().trim_matches('"'))
-            .bind(serde_json::to_value(&snapshot.metrics).unwrap_or_default())
-            .bind(serde_json::to_value(&snapshot.weights).unwrap_or_default())
-            .bind(snapshot.emotion_feedback as f32)
+            .bind(result.wvi_score as f32)
+            .bind(&result.level)
+            .bind(serde_json::to_value(&result.metric_scores).unwrap_or_default())
+            .bind(serde_json::json!({ "version": "2.0", "type": "geometric_weighted" }))
+            .bind(result.emotion_multiplier as f32)
             .execute(&pool)
             .await?;
 

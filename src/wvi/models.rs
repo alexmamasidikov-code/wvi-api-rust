@@ -27,6 +27,21 @@ impl WVILevel {
     }
 }
 
+impl std::fmt::Display for WVILevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Superb => "superb",
+            Self::Excellent => "excellent",
+            Self::Good => "good",
+            Self::Moderate => "moderate",
+            Self::Low => "low",
+            Self::Poor => "poor",
+            Self::Dangerous => "dangerous",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricScores {
@@ -120,12 +135,19 @@ pub struct WVIHistoryQuery {
 #[serde(rename_all = "camelCase")]
 pub struct SimulateRequest {
     pub heart_rate: Option<f64>,
+    pub resting_hr: Option<f64>,
     pub hrv: Option<f64>,
     pub stress: Option<f64>,
     pub spo2: Option<f64>,
     pub temperature: Option<f64>,
     pub sleep_hours: Option<f64>,
+    pub sleep_score: Option<f64>,
     pub steps: Option<f64>,
+    pub active_calories: Option<f64>,
+    pub acwr: Option<f64>,
     pub systolic_bp: Option<f64>,
     pub diastolic_bp: Option<f64>,
+    pub ppi_coherence: Option<f64>,
+    pub emotion_name: Option<String>,
+    pub emotion_score: Option<f64>,
 }
