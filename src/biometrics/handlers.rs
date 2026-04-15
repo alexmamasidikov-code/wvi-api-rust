@@ -277,6 +277,57 @@ pub async fn get_coherence(user: AuthUser, State(pool): State<PgPool>, Query(q):
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
+// ═══ COMPUTED METRICS ═══
+pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    use super::computed;
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+
+    let hr = sqlx::query_scalar::<_, f32>("SELECT bpm FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
+        .bind(uid).fetch_optional(&pool).await?.unwrap_or(70.0) as f64;
+    let hrv = sqlx::query_scalar::<_, f32>("SELECT rmssd FROM hrv WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
+        .bind(uid).fetch_optional(&pool).await?.unwrap_or(50.0) as f64;
+    let spo2 = sqlx::query_scalar::<_, f32>("SELECT value FROM spo2 WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
+        .bind(uid).fetch_optional(&pool).await?.unwrap_or(98.0) as f64;
+    let steps = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(steps)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'")
+        .bind(uid).fetch_one(&pool).await? as f64;
+    let active_min = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(active_minutes)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'")
+        .bind(uid).fetch_one(&pool).await? as f64;
+
+    // Fetch latest sleep data for sleep score
+    let sleep_row = sqlx::query_as::<_, (Option<f32>, Option<f32>, Option<f32>, Option<f32>)>(
+        "SELECT deep_percent, rem_percent, total_hours, awake_percent FROM sleep_records WHERE user_id = $1 ORDER BY date DESC LIMIT 1"
+    ).bind(uid).fetch_optional(&pool).await?;
+    let sleep_score = if let Some((deep, rem, hours, awake)) = sleep_row {
+        computed::compute_sleep_score(
+            deep.unwrap_or(20.0) as f64,
+            rem.unwrap_or(20.0) as f64,
+            hours.unwrap_or(7.5) as f64,
+            awake.unwrap_or(5.0) as f64,
+        )
+    } else {
+        75.0
+    };
+
+    let age = 30.0; // Default — should come from user profile
+    let (sys, dia) = computed::estimate_blood_pressure(hr, hrv);
+    let vo2_max = computed::estimate_vo2_max(hr, age);
+    let coherence = computed::compute_coherence(hrv);
+    let bio_age = computed::compute_bio_age(age, hr, hrv, spo2, steps, sleep_score);
+    let training_load = computed::compute_training_load(active_min, hr, 220.0 - age);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "bloodPressure": { "systolic": sys, "diastolic": dia },
+            "vo2Max": (vo2_max * 10.0).round() / 10.0,
+            "coherence": coherence.round(),
+            "bioAge": bio_age,
+            "trainingLoad": training_load,
+            "sleepScore": sleep_score,
+        }
+    })))
+}
+
 // ═══ REALTIME SNAPSHOT ═══
 pub async fn get_realtime(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     let hr = sqlx::query_as::<_, (f32,)>("SELECT bpm FROM heart_rate WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1").bind(&user.privy_did).fetch_optional(&pool).await?;

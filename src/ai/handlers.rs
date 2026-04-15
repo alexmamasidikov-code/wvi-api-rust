@@ -158,9 +158,27 @@ async fn call_claude(pool: &PgPool, privy_did: &str, prompt: &str) -> Result<Str
     let ctx = fetch_biometrics(pool, privy_did).await;
     let bio_context = format_biometric_context(&ctx);
 
+    // Compute derived metrics for richer AI context
+    let heart_rate = ctx.heart_rate.unwrap_or(70.0) as f64;
+    let hrv = ctx.hrv_rmssd.unwrap_or(50.0) as f64;
+    let spo2 = ctx.spo2.unwrap_or(98.0) as f64;
+    let steps = ctx.steps.unwrap_or(0) as f64;
+
+    let (sys, dia) = crate::biometrics::computed::estimate_blood_pressure(heart_rate, hrv);
+    let vo2 = crate::biometrics::computed::estimate_vo2_max(heart_rate, 30.0);
+    let coherence = crate::biometrics::computed::compute_coherence(hrv);
+    let bio_age = crate::biometrics::computed::compute_bio_age(30.0, heart_rate, hrv, spo2, steps, 75.0);
+
+    let mut computed_parts = vec!["Computed estimates:".to_string()];
+    computed_parts.push(format!("- Estimated BP: {:.0}/{:.0} mmHg", sys, dia));
+    computed_parts.push(format!("- Estimated VO2 Max: {:.1} ml/kg/min", vo2));
+    computed_parts.push(format!("- Cardiac Coherence: {:.0}%", coherence));
+    computed_parts.push(format!("- Estimated Bio Age: {:.0} years", bio_age));
+    let computed_context = computed_parts.join("\n");
+
     let system_prompt = format!(
-        "You are Wellex AI, a personal wellness assistant. You analyze biometric data and provide health insights. Be concise, supportive, and actionable. Respond in 2-3 sentences max.\n\n{}",
-        bio_context
+        "You are Wellex AI, a personal wellness assistant. You analyze biometric data and provide health insights. Be concise, supportive, and actionable. Respond in 2-3 sentences max.\n\n{}\n\n{}",
+        bio_context, computed_context
     );
 
     let client = reqwest::Client::new();
