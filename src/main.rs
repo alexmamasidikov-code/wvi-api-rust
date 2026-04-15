@@ -66,6 +66,17 @@ async fn main() {
         tracing::info!("Privy auth configured");
     } else {
         tracing::warn!("Privy not configured — using dev mode auth");
+        sqlx::query(
+            r#"INSERT INTO users (id, email, name, password_hash, privy_did, linked_accounts, created_at, updated_at)
+               VALUES (gen_random_uuid(), 'dev@wvi.health', 'Alexander', '', 'did:privy:dev-user', '[]'::jsonb, NOW(), NOW())
+               ON CONFLICT (privy_did) DO UPDATE SET
+                 email = EXCLUDED.email,
+                 name = EXCLUDED.name,
+                 updated_at = NOW()"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to bootstrap dev user");
     }
 
     let cors = CorsLayer::new()
@@ -158,15 +169,15 @@ async fn main() {
         .route("/api/v1/reports/generate", post(reports::handlers::generate))
         .route("/api/v1/reports/list", get(reports::handlers::list))
         .route("/api/v1/reports/templates", get(reports::handlers::get_templates))
-        .route("/api/v1/reports/:id", get(reports::handlers::get_by_id))
-        .route("/api/v1/reports/:id/download", get(reports::handlers::download))
+        .route("/api/v1/reports/{id}", get(reports::handlers::get_by_id))
+        .route("/api/v1/reports/{id}/download", get(reports::handlers::download))
 
         // ═══ ALERTS (6) ═══
         .route("/api/v1/alerts/list", get(alerts::handlers::list))
         .route("/api/v1/alerts/active", get(alerts::handlers::active))
         .route("/api/v1/alerts/settings", get(alerts::handlers::get_settings))
         .route("/api/v1/alerts/history", get(alerts::handlers::get_history))
-        .route("/api/v1/alerts/:id/acknowledge", post(alerts::handlers::acknowledge))
+        .route("/api/v1/alerts/{id}/acknowledge", post(alerts::handlers::acknowledge))
         .route("/api/v1/alerts/stats", get(alerts::handlers::stats))
 
         // ═══ DEVICE (6) ═══

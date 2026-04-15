@@ -150,46 +150,56 @@ async fn call_claude(pool: &PgPool, privy_did: &str, prompt: &str) -> Result<Str
     }
 
     let model = std::env::var("CLAUDE_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        .unwrap_or_else(|_| "google/gemini-2.0-flash-001".to_string());
+
+    let api_url = std::env::var("CLAUDE_API_URL")
+        .unwrap_or_else(|_| "https://openrouter.ai/api/v1/chat/completions".to_string());
 
     let ctx = fetch_biometrics(pool, privy_did).await;
     let bio_context = format_biometric_context(&ctx);
 
-    let full_prompt = format!("{}\n\n{}", bio_context, prompt);
+    let system_prompt = format!(
+        "You are Wellex AI, a personal wellness assistant. You analyze biometric data and provide health insights. Be concise, supportive, and actionable. Respond in 2-3 sentences max.\n\n{}",
+        bio_context
+    );
 
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 500,
-        "messages": [{"role": "user", "content": full_prompt}]
+        "max_tokens": 300,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
     });
 
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
+        .post(&api_url)
+        .header("Authorization", format!("Bearer {}", api_key))
         .header("content-type", "application/json")
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Failed to reach Claude API: {}", e))?;
+        .map_err(|e| format!("Failed to reach AI API: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Claude API error {}: {}", status, text));
+        return Err(format!("AI API error {}: {}", status, text));
     }
 
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse Claude response: {}", e))?;
+        .map_err(|e| format!("Failed to parse AI response: {}", e))?;
 
+    // OpenRouter / OpenAI format: choices[0].message.content
     let text = json
-        .get("content")
+        .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|arr| arr.first())
-        .and_then(|item| item.get("text"))
+        .and_then(|item| item.get("message"))
+        .and_then(|msg| msg.get("content"))
         .and_then(|t| t.as_str())
         .unwrap_or("No response from AI.")
         .to_string();
