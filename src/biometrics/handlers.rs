@@ -15,7 +15,7 @@ fn default_to() -> chrono::DateTime<Utc> {
     Utc::now() + Duration::days(1)
 }
 
-async fn get_user_uuid(pool: &PgPool, privy_did: &str) -> AppResult<uuid::Uuid> {
+pub async fn get_user_uuid(pool: &PgPool, privy_did: &str) -> AppResult<uuid::Uuid> {
     sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE privy_did = $1")
         .bind(privy_did)
         .fetch_optional(pool)

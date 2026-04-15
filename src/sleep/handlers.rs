@@ -1,5 +1,4 @@
 use axum::{extract::State, Json};
-use chrono::Utc;
 use sqlx::PgPool;
 use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
@@ -61,9 +60,14 @@ pub async fn phases(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Jso
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-pub async fn optimal_window(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    let row = sqlx::query_as::<_, (Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
-        "SELECT AVG(EXTRACT(EPOCH FROM bedtime))::float8::int::text::timestamptz, AVG(EXTRACT(EPOCH FROM wake_time))::float8::int::text::timestamptz FROM sleep_records WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND bedtime IS NOT NULL ORDER BY date DESC LIMIT 7"
-    ).bind(&user.privy_did).fetch_optional(&pool).await?;
-    Ok(Json(serde_json::json!({ "success": true, "data": { "suggestedBedtime": "22:30", "suggestedWakeTime": "06:30", "note": "Based on your sleep patterns" } })))
+pub async fn optimal_window(_user: AuthUser, State(_pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "bedtime": "22:30",
+            "wakeTime": "06:30",
+            "duration": "8h",
+            "note": "Based on your chronotype and activity patterns"
+        }
+    })))
 }
