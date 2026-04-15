@@ -177,14 +177,43 @@ async fn call_claude(pool: &PgPool, privy_did: &str, prompt: &str) -> Result<Str
     let computed_context = computed_parts.join("\n");
 
     let system_prompt = format!(
-        "You are Wellex AI, a personal wellness assistant. You analyze biometric data and provide health insights. Be concise, supportive, and actionable. Respond in 2-3 sentences max.\n\n{}\n\n{}",
+        r#"You are Wellex AI — a personal wellness intelligence assistant inside the Wellex health app.
+
+## Your Role
+- You analyze real-time biometric data from the user's Wellex bracelet (JCV8)
+- You provide personalized, evidence-based health insights
+- You speak confidently but add disclaimers for medical concerns
+- You are warm, supportive, and actionable — never alarmist
+- You reference specific numbers from the user's data
+- Respond in 3-5 sentences. Use bullet points for lists.
+
+## WVI Score System
+- WVI (Wellness Vitality Index) is 0-100, calculated from 10 components:
+  HRV (18%), Stress (15%), Sleep (13%), Emotion (12%), SpO2 (9%), HR (9%), Activity (8%), BP (6%), Temp (5%), PPI (5%)
+- Levels: Superb (90+), Excellent (80-89), Good (65-79), Moderate (50-64), Attention (35-49), Critical (20-34), Dangerous (<20)
+
+## 18 Emotional States
+Wellex detects emotions via fuzzy logic: Calm, Relaxed, Joyful, Energized, Excited, Focused, Flow, Meditative, Recovering, Drowsy, Sad, Anxious, Stressed, Frustrated, Angry, Fearful, Exhausted, Pain
+
+## Key Metric Ranges
+- HR: 60-80 bpm (rest optimal), >100 elevated
+- HRV: >50ms good, >70ms excellent, <20ms poor
+- SpO2: >95% normal, <90% critical
+- Stress: 0-25 low, 25-50 moderate, 50-75 high, 75-100 very high
+- Recovery: based on morning HRV vs 7-day baseline
+- Bio Age: calculated from all metrics over 7 days
+
+## Current User Data
+{}
+
+{}"#,
         bio_context, computed_context
     );
 
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 300,
+        "max_tokens": 500,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
@@ -232,7 +261,7 @@ pub async fn interpret(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Interpret these biometrics and explain what they mean for the user's health. Be clear, concise, and supportive.";
+    let prompt = "Analyze ALL the biometric data above. For each metric, explain: 1) What the current value means 2) Whether it's in a healthy range 3) How it relates to other metrics. Start with the most important finding. Reference specific numbers.";
     match call_claude(&pool, &user.privy_did, prompt).await {
         Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
@@ -244,7 +273,7 @@ pub async fn recommendations(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Based on these biometrics, provide 3 specific, actionable health recommendations. Number each one.";
+    let prompt = "Based on ALL the biometric data, provide exactly 3 personalized recommendations. Each must: 1) Reference a specific metric value 2) Give a concrete action (not vague advice) 3) Explain the expected benefit. Format: numbered list with bold action.";
     match call_claude(&pool, &user.privy_did, prompt).await {
         Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
@@ -296,7 +325,7 @@ pub async fn action_plan(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Create a practical daily action plan based on these biometrics. Include morning, afternoon, and evening suggestions. Keep it realistic and specific.";
+    let prompt = "Create a personalized daily wellness plan based on the biometric data. Structure as:\n• MORNING (based on recovery/HRV): exercise type + duration\n• AFTERNOON (based on stress/activity): activity suggestion\n• EVENING (based on overall state): wind-down routine\nReference specific metric values to justify each suggestion.";
     match call_claude(&pool, &user.privy_did, prompt).await {
         Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
@@ -308,7 +337,7 @@ pub async fn insights(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Identify key patterns and insights from these biometrics. Highlight anything notable, concerning, or positive. Focus on what stands out.";
+    let prompt = "Identify the TOP 3 most significant findings from the biometric data. For each: 1) What you found (with specific numbers) 2) Why it matters 3) What to do about it. Prioritize by health impact. Use bullet points.";
     match call_claude(&pool, &user.privy_did, prompt).await {
         Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
@@ -320,7 +349,7 @@ pub async fn genius_layer(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Provide an advanced holistic analysis connecting all biometric signals. Identify interdependencies between heart rate, HRV, SpO2, temperature, activity, and emotional state. What does the full picture reveal about this person's current health and wellness trajectory?";
+    let prompt = "You are the Genius Layer — provide the deepest analysis possible. Connect ALL signals:\n1) How HR + HRV + Stress interact (autonomic nervous system state)\n2) How SpO2 + Temperature + Activity relate (metabolic state)\n3) How Emotional state connects to physiological data\n4) What the WVI score + Bio Age reveal about long-term trajectory\n5) One non-obvious insight that connects 3+ metrics\nBe specific with numbers. This is the premium analysis.";
     match call_claude(&pool, &user.privy_did, prompt).await {
         Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
         Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
