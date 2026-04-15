@@ -17,6 +17,7 @@ mod dashboard;
 mod export;
 mod settings;
 mod health;
+mod social;
 
 use std::sync::Arc;
 use axum::{
@@ -56,6 +57,39 @@ async fn main() {
         .run(&pool)
         .await
         .expect("Failed to run migrations");
+
+    // Social tables
+    sqlx::query("CREATE TABLE IF NOT EXISTS social_posts (
+        id BIGSERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id),
+        content TEXT NOT NULL,
+        likes INT DEFAULT 0,
+        comments INT DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    )").execute(&pool).await.ok();
+
+    sqlx::query("CREATE TABLE IF NOT EXISTS challenges (
+        id BIGSERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        target_value REAL,
+        start_date DATE,
+        end_date DATE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    )").execute(&pool).await.ok();
+
+    sqlx::query("CREATE TABLE IF NOT EXISTS challenge_participants (
+        id BIGSERIAL PRIMARY KEY,
+        challenge_id BIGINT REFERENCES challenges(id),
+        user_id UUID REFERENCES users(id),
+        progress REAL DEFAULT 0,
+        joined_at TIMESTAMPTZ DEFAULT NOW()
+    )").execute(&pool).await.ok();
+
+    // Seed challenges
+    sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('10K Steps Daily', 'Walk 10,000 steps every day', 10000, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
+    sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('Sleep Score 80+', 'Achieve sleep score above 80 for a week', 80, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
+    sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('HRV Improvement', 'Improve your HRV by 10% this week', 10, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
 
     // Privy client
     let privy = Arc::new(PrivyClient::new(
@@ -217,6 +251,12 @@ async fn main() {
         .route("/api/v1/settings", get(settings::handlers::get_settings).put(settings::handlers::update_settings))
         .route("/api/v1/settings/notifications", get(settings::handlers::get_notifications).put(settings::handlers::update_notifications))
 
+        // ═══ SOCIAL (4) ═══
+        .route("/api/v1/social/feed", get(social::handlers::get_feed))
+        .route("/api/v1/social/post", post(social::handlers::create_post))
+        .route("/api/v1/social/challenges", get(social::handlers::get_challenges))
+        .route("/api/v1/social/leaderboard", get(social::handlers::get_leaderboard))
+
         // ═══ HEALTH (3 — PUBLIC) ═══
         .route("/api/v1/health/server-status", get(health::handlers::server_status))
         .route("/api/v1/health/api-version", get(health::handlers::api_version))
@@ -229,7 +269,7 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!("WVI API starting on {addr}");
-    tracing::info!("115 endpoints registered across 17 modules");
+    tracing::info!("119 endpoints registered across 18 modules");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
