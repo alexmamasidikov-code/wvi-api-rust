@@ -272,5 +272,13 @@ async fn main() {
     tracing::info!("119 endpoints registered across 18 modules");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
+    tracing::info!("Shutdown signal received");
 }

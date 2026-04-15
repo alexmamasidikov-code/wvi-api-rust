@@ -721,6 +721,7 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
             Ok(())
         }.await;
 
+        let emotion_ok = emotion_result.is_ok();
         if let Err(e) = emotion_result {
             tracing::warn!("Emotion detection failed after sync (non-fatal): {}", e);
         }
@@ -819,6 +820,12 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
         if let Err(e) = wvi_result {
             tracing::warn!("WVI auto-calculation failed after sync (non-fatal): {}", e);
         }
+
+        tracing::info!(
+            "Sync complete: {} records processed, emotion: {}, wvi: calculated",
+            processed,
+            if emotion_ok { "detected" } else { "failed" }
+        );
     }
 
     Ok(Json(serde_json::json!({

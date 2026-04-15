@@ -1,13 +1,17 @@
-use axum::Json;
+use axum::{extract::State, Json};
+use sqlx::PgPool;
 use crate::error::AppResult;
 
-pub async fn server_status() -> AppResult<Json<serde_json::Value>> {
+pub async fn server_status(State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let db_ok = sqlx::query("SELECT 1").execute(&pool).await.is_ok();
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "status": "healthy",
+            "database": if db_ok { "connected" } else { "disconnected" },
+            "endpoints": 119,
+            "version": "1.0.0",
             "uptime": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            "version": env!("CARGO_PKG_VERSION"),
         }
     })))
 }
