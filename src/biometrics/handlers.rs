@@ -10,6 +10,11 @@ fn default_from() -> chrono::DateTime<Utc> {
     Utc::now() - Duration::days(7)
 }
 
+fn default_to() -> chrono::DateTime<Utc> {
+    // Add 1 day buffer for timezone differences
+    Utc::now() + Duration::days(1)
+}
+
 async fn get_user_uuid(pool: &PgPool, privy_did: &str) -> AppResult<uuid::Uuid> {
     sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE privy_did = $1")
         .bind(privy_did)
@@ -21,11 +26,15 @@ async fn get_user_uuid(pool: &PgPool, privy_did: &str) -> AppResult<uuid::Uuid> 
 // ═══ HEART RATE ═══
 pub async fn get_heart_rate(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
-    let rows = sqlx::query_as::<_, HeartRateRecord>(
-        "SELECT id, NULL::text as user_id, timestamp, bpm, confidence, zone FROM heart_rate WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    Ok(Json(serde_json::json!({ "success": true, "data": rows })))
+    let to = q.to.unwrap_or_else(default_to);
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, f32, Option<f32>, Option<i32>)>(
+        "SELECT timestamp, bpm, confidence, zone FROM heart_rate WHERE user_id = $1 AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
+    ).bind(uid).bind(from).bind(to).fetch_all(&pool).await?;
+    let data: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "timestamp": r.0, "bpm": r.1, "confidence": r.2, "zone": r.3,
+    })).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
 pub async fn post_heart_rate(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
@@ -43,11 +52,15 @@ pub async fn post_heart_rate(user: AuthUser, State(pool): State<PgPool>, Json(bo
 // ═══ HRV ═══
 pub async fn get_hrv(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
-    let rows = sqlx::query_as::<_, HRVRecord>(
-        "SELECT id, NULL::text as user_id, timestamp, sdnn, rmssd, pnn50, ln_rmssd, stress, heart_rate, systolic_bp, diastolic_bp FROM hrv WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    Ok(Json(serde_json::json!({ "success": true, "data": rows })))
+    let to = q.to.unwrap_or_else(default_to);
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<f32>, Option<f32>, Option<f32>)>(
+        "SELECT timestamp, rmssd, stress, heart_rate FROM hrv WHERE user_id = $1 AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
+    ).bind(uid).bind(from).bind(to).fetch_all(&pool).await?;
+    let data: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "timestamp": r.0, "rmssd": r.1, "stress": r.2, "heartRate": r.3,
+    })).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
 pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
@@ -72,11 +85,15 @@ pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
 // ═══ SpO2 ═══
 pub async fn get_spo2(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
-    let rows = sqlx::query_as::<_, SpO2Record>(
-        "SELECT id, NULL::text as user_id, timestamp, value, confidence FROM spo2 WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    Ok(Json(serde_json::json!({ "success": true, "data": rows })))
+    let to = q.to.unwrap_or_else(default_to);
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, f32, Option<f32>)>(
+        "SELECT timestamp, value, confidence FROM spo2 WHERE user_id = $1 AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
+    ).bind(uid).bind(from).bind(to).fetch_all(&pool).await?;
+    let data: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "timestamp": r.0, "value": r.1, "spo2": r.1, "confidence": r.2,
+    })).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
 pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
@@ -93,11 +110,15 @@ pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, Json(body): J
 // ═══ TEMPERATURE ═══
 pub async fn get_temperature(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
-    let rows = sqlx::query_as::<_, TemperatureRecord>(
-        "SELECT id, NULL::text as user_id, timestamp, value, location FROM temperature WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    Ok(Json(serde_json::json!({ "success": true, "data": rows })))
+    let to = q.to.unwrap_or_else(default_to);
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, f32, Option<String>)>(
+        "SELECT timestamp, value, location FROM temperature WHERE user_id = $1 AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
+    ).bind(uid).bind(from).bind(to).fetch_all(&pool).await?;
+    let data: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "timestamp": r.0, "value": r.1, "celsius": r.1, "location": r.2,
+    })).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
 pub async fn post_temperature(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
@@ -140,7 +161,7 @@ pub async fn post_sleep(user: AuthUser, State(pool): State<PgPool>, Json(body): 
 // ═══ PPI ═══
 pub async fn get_ppi(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, PPIRecord>(
         "SELECT id, NULL::text as user_id, timestamp, intervals, rmssd, coherence FROM ppi WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 500"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -161,7 +182,7 @@ pub async fn post_ppi(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
 // ═══ ECG ═══
 pub async fn get_ecg(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, (uuid::Uuid, chrono::DateTime<Utc>, Option<i32>, Option<i32>, Option<serde_json::Value>)>(
         "SELECT id, timestamp, duration_seconds, sample_rate, analysis FROM ecg WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 50"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -187,7 +208,7 @@ pub async fn post_ecg(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
 // ═══ ACTIVITY ═══
 pub async fn get_activity(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, ActivityRecord>(
         "SELECT id, NULL::text as user_id, timestamp, steps, calories, distance, active_minutes, mets, activity_type FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -211,7 +232,7 @@ pub async fn post_activity(user: AuthUser, State(pool): State<PgPool>, Json(body
 // ═══ DERIVED METRICS ═══
 pub async fn get_blood_pressure(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<f32>, Option<f32>)>(
         "SELECT timestamp, systolic_bp, diastolic_bp FROM hrv WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND systolic_bp IS NOT NULL AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 500"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -221,7 +242,7 @@ pub async fn get_blood_pressure(user: AuthUser, State(pool): State<PgPool>, Quer
 
 pub async fn get_stress(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<f32>)>(
         "SELECT timestamp, stress FROM hrv WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND stress IS NOT NULL AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 500"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -238,7 +259,7 @@ pub async fn get_breathing_rate(user: AuthUser, State(pool): State<PgPool>) -> A
 
 pub async fn get_rmssd(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<f32>)>(
         "SELECT timestamp, rmssd FROM hrv WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND rmssd IS NOT NULL AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 500"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -248,7 +269,7 @@ pub async fn get_rmssd(user: AuthUser, State(pool): State<PgPool>, Query(q): Que
 
 pub async fn get_coherence(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(Utc::now);
+    let to = q.to.unwrap_or_else(default_to);
     let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<f32>)>(
         "SELECT timestamp, coherence FROM ppi WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND coherence IS NOT NULL AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 500"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
