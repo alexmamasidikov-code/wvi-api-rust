@@ -277,6 +277,76 @@ pub async fn get_coherence(user: AuthUser, State(pool): State<PgPool>, Query(q):
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
+// ═══ RECOVERY ═══
+pub async fn get_recovery(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+
+    // Get latest HRV (morning reading)
+    let morning_hrv = sqlx::query_scalar::<_, f32>(
+        "SELECT rmssd FROM hrv WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
+    ).bind(uid).fetch_optional(&pool).await?.unwrap_or(0.0) as f64;
+
+    // Get 7-day HRV baseline (average)
+    let baseline_hrv = sqlx::query_scalar::<_, f64>(
+        "SELECT COALESCE(AVG(rmssd)::float8, 0) FROM hrv WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days'"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0.0);
+
+    // Get last night sleep score
+    let sleep_score = sqlx::query_scalar::<_, f32>(
+        "SELECT COALESCE(sleep_score, 0) FROM sleep_records WHERE user_id = $1 ORDER BY date DESC LIMIT 1"
+    ).bind(uid).fetch_optional(&pool).await?.unwrap_or(0.0) as f64;
+
+    // Count days of HRV data
+    let hrv_days = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT DATE(timestamp)) FROM hrv WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days'"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
+
+    // Need at least morning HRV to calculate
+    if morning_hrv == 0.0 {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "ready": false,
+                "reason": "No HRV data available. Wear bracelet and stay still for 60 seconds.",
+                "recoveryPercent": null,
+            }
+        })));
+    }
+
+    // Calculate recovery
+    let hrv_ratio = if baseline_hrv > 0.0 { morning_hrv / baseline_hrv } else { 1.0 };
+
+    // Recovery formula:
+    // - HRV vs baseline: 60% weight (ratio > 1.0 = better than usual)
+    // - Sleep quality: 30% weight
+    // - Absolute HRV quality: 10% weight
+    let hrv_component = (hrv_ratio * 100.0).clamp(0.0, 130.0) * 0.6;  // Can exceed 100% if better than baseline
+    let sleep_component = sleep_score * 0.3;
+    let abs_component = (morning_hrv / 100.0 * 100.0).clamp(0.0, 100.0) * 0.1;
+
+    let recovery = (hrv_component + sleep_component + abs_component).clamp(0.0, 100.0).round();
+
+    let level = if recovery >= 80.0 { "excellent" }
+        else if recovery >= 60.0 { "good" }
+        else if recovery >= 40.0 { "moderate" }
+        else { "poor" };
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "ready": true,
+            "recoveryPercent": recovery,
+            "level": level,
+            "morningHRV": morning_hrv,
+            "baselineHRV": if baseline_hrv > 0.0 { Some(baseline_hrv) } else { None::<f64> },
+            "hrvRatio": hrv_ratio,
+            "sleepScore": sleep_score,
+            "daysOfData": hrv_days,
+            "note": if hrv_days < 3 { "Recovery accuracy improves with more days of data" } else { "Based on your personal baseline" },
+        }
+    })))
+}
+
 // ═══ COMPUTED METRICS ═══
 pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     use super::computed;
@@ -314,28 +384,6 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
         0.0
     };
 
-    // Check data stability requirements for Bio Age
-    let hr_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM heart_rate WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '1 hour'"
-    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
-    let has_stable_hr = hr_count >= 5;
-
-    let has_hrv = hrv > 0.0;
-    let has_spo2 = spo2 > 0.0;
-
-    let has_sleep = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sleep_records WHERE user_id = $1"
-    ).bind(uid).fetch_one(&pool).await.unwrap_or(0) > 0;
-
-    // Collect missing requirements for diagnostics
-    let mut missing_requirements: Vec<&str> = Vec::new();
-    if !has_stable_hr { missing_requirements.push("stable HR (5+ readings in last hour)"); }
-    if !has_hrv { missing_requirements.push("HRV reading"); }
-    if !has_spo2 { missing_requirements.push("SpO2 reading"); }
-    if !has_sleep { missing_requirements.push("sleep data (at least 1 night)"); }
-
-    let bio_age_ready = has_stable_hr && has_hrv && has_spo2 && has_sleep;
-
     let age = 30.0; // Default — should come from user profile
 
     // Use fallback values for non-bio-age computed metrics so they still work
@@ -349,11 +397,52 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
     let coherence = computed::compute_coherence(hrv_for_compute);
     let training_load = computed::compute_training_load(active_min, hr_for_compute, 220.0 - age);
 
+    // Bio Age requires 7 days of accumulated data
+    let days_with_hr = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT DATE(timestamp)) FROM heart_rate WHERE user_id = $1"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
+
+    let days_with_hrv = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT DATE(timestamp)) FROM hrv WHERE user_id = $1"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
+
+    let days_with_sleep = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sleep_records WHERE user_id = $1"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
+
+    let bio_age_ready = days_with_hr >= 7 && days_with_hrv >= 7 && days_with_sleep >= 7;
+
     let bio_age = if bio_age_ready {
-        Some(computed::compute_bio_age(age, hr, hrv, spo2_for_compute, steps, sleep_score))
+        // Use 7-day averages for stable calculation
+        let avg_hr = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(AVG(bpm)::float8, 70) FROM heart_rate WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days'"
+        ).bind(uid).fetch_one(&pool).await.unwrap_or(70.0);
+
+        let avg_hrv = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(AVG(rmssd)::float8, 50) FROM hrv WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days'"
+        ).bind(uid).fetch_one(&pool).await.unwrap_or(50.0);
+
+        let avg_spo2 = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(AVG(value)::float8, 98) FROM spo2 WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days'"
+        ).bind(uid).fetch_one(&pool).await.unwrap_or(98.0);
+
+        let avg_steps = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(AVG(daily_steps)::float8, 0) FROM (SELECT DATE(timestamp), SUM(steps) as daily_steps FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days' GROUP BY DATE(timestamp)) sub"
+        ).bind(uid).fetch_one(&pool).await.unwrap_or(0.0);
+
+        let avg_sleep = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(AVG(sleep_score)::float8, 0) FROM sleep_records WHERE user_id = $1 AND date >= CURRENT_DATE - 7"
+        ).bind(uid).fetch_one(&pool).await.unwrap_or(0.0);
+
+        Some(computed::compute_bio_age(age, avg_hr, avg_hrv, avg_spo2, avg_steps, avg_sleep))
     } else {
         None
     };
+
+    let mut requirements: Vec<String> = vec![];
+    if days_with_hr < 7 { requirements.push(format!("HR data: {}/7 days", days_with_hr)); }
+    if days_with_hrv < 7 { requirements.push(format!("HRV data: {}/7 days", days_with_hrv)); }
+    if days_with_sleep < 7 { requirements.push(format!("Sleep data: {}/7 nights", days_with_sleep)); }
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -363,7 +452,7 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
             "coherence": coherence.round(),
             "bioAge": bio_age,
             "bioAgeReady": bio_age_ready,
-            "bioAgeRequirements": missing_requirements,
+            "bioAgeRequirements": requirements,
             "trainingLoad": training_load,
             "sleepScore": sleep_score_for_display,
         }
