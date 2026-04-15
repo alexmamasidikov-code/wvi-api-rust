@@ -282,12 +282,18 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
     use super::computed;
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
 
-    let hr = sqlx::query_scalar::<_, f32>("SELECT bpm FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
-        .bind(uid).fetch_optional(&pool).await?.unwrap_or(70.0) as f64;
-    let hrv = sqlx::query_scalar::<_, f32>("SELECT rmssd FROM hrv WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
-        .bind(uid).fetch_optional(&pool).await?.unwrap_or(50.0) as f64;
-    let spo2 = sqlx::query_scalar::<_, f32>("SELECT value FROM spo2 WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
-        .bind(uid).fetch_optional(&pool).await?.unwrap_or(98.0) as f64;
+    let hr_opt = sqlx::query_scalar::<_, f32>("SELECT bpm FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
+        .bind(uid).fetch_optional(&pool).await?;
+    let hr = hr_opt.unwrap_or(0.0) as f64;
+
+    let hrv_opt = sqlx::query_scalar::<_, f32>("SELECT rmssd FROM hrv WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
+        .bind(uid).fetch_optional(&pool).await?;
+    let hrv = hrv_opt.unwrap_or(0.0) as f64;
+
+    let spo2_opt = sqlx::query_scalar::<_, f32>("SELECT value FROM spo2 WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1")
+        .bind(uid).fetch_optional(&pool).await?;
+    let spo2 = spo2_opt.unwrap_or(0.0) as f64;
+
     let steps = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(steps)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'")
         .bind(uid).fetch_one(&pool).await? as f64;
     let active_min = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(active_minutes)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'")
@@ -305,15 +311,49 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
             awake.unwrap_or(5.0) as f64,
         )
     } else {
-        75.0
+        0.0
     };
 
+    // Check data stability requirements for Bio Age
+    let hr_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM heart_rate WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '1 hour'"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
+    let has_stable_hr = hr_count >= 5;
+
+    let has_hrv = hrv > 0.0;
+    let has_spo2 = spo2 > 0.0;
+
+    let has_sleep = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sleep_records WHERE user_id = $1"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0) > 0;
+
+    // Collect missing requirements for diagnostics
+    let mut missing_requirements: Vec<&str> = Vec::new();
+    if !has_stable_hr { missing_requirements.push("stable HR (5+ readings in last hour)"); }
+    if !has_hrv { missing_requirements.push("HRV reading"); }
+    if !has_spo2 { missing_requirements.push("SpO2 reading"); }
+    if !has_sleep { missing_requirements.push("sleep data (at least 1 night)"); }
+
+    let bio_age_ready = has_stable_hr && has_hrv && has_spo2 && has_sleep;
+
     let age = 30.0; // Default — should come from user profile
-    let (sys, dia) = computed::estimate_blood_pressure(hr, hrv);
-    let vo2_max = computed::estimate_vo2_max(hr, age);
-    let coherence = computed::compute_coherence(hrv);
-    let bio_age = computed::compute_bio_age(age, hr, hrv, spo2, steps, sleep_score);
-    let training_load = computed::compute_training_load(active_min, hr, 220.0 - age);
+
+    // Use fallback values for non-bio-age computed metrics so they still work
+    let hr_for_compute = if hr > 0.0 { hr } else { 70.0 };
+    let hrv_for_compute = if hrv > 0.0 { hrv } else { 50.0 };
+    let spo2_for_compute = if spo2 > 0.0 { spo2 } else { 98.0 };
+    let sleep_score_for_display = if sleep_score > 0.0 { sleep_score } else { 75.0 };
+
+    let (sys, dia) = computed::estimate_blood_pressure(hr_for_compute, hrv_for_compute);
+    let vo2_max = computed::estimate_vo2_max(hr_for_compute, age);
+    let coherence = computed::compute_coherence(hrv_for_compute);
+    let training_load = computed::compute_training_load(active_min, hr_for_compute, 220.0 - age);
+
+    let bio_age = if bio_age_ready {
+        Some(computed::compute_bio_age(age, hr, hrv, spo2_for_compute, steps, sleep_score))
+    } else {
+        None
+    };
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -322,8 +362,10 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
             "vo2Max": (vo2_max * 10.0).round() / 10.0,
             "coherence": coherence.round(),
             "bioAge": bio_age,
+            "bioAgeReady": bio_age_ready,
+            "bioAgeRequirements": missing_requirements,
             "trainingLoad": training_load,
-            "sleepScore": sleep_score,
+            "sleepScore": sleep_score_for_display,
         }
     })))
 }
