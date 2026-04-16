@@ -1,5 +1,5 @@
 use axum::{extract::{Query, State}, Json};
-use chrono::{Utc, Duration};
+use chrono::{Utc, Duration, Timelike};
 use sqlx::PgPool;
 use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
@@ -68,26 +68,57 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
     ).bind(&user.privy_did).fetch_one(&pool).await?.0.unwrap_or(5000.0);
     let acwr = if chronic > 0.0 { acute / chronic } else { 1.0 };
 
+    // FIX: Convert skin temp to body temp (+2°C offset)
+    let body_temp = if temp < 35.0 { temp + 2.0 } else { temp }; // skin temp → body
     let base_temp = 36.6;
-    let temp_delta = temp - base_temp;
+    let temp_delta = body_temp - base_temp;
+
     let steps = act.0.unwrap_or(0.0);
-    let active_calories = act.2.unwrap_or(0.0);
+    let total_calories = act.2.unwrap_or(0.0);
+    // FIX: Subtract BMR to get ACTIVE calories only (~67 kcal/hr BMR)
+    let hours_today = {
+        let now = Utc::now();
+        now.hour() as f64 + now.minute() as f64 / 60.0
+    };
+    let bmr_so_far = hours_today * 67.0; // ~1600 kcal/day BMR
+    let active_calories = (total_calories - bmr_so_far).max(0.0);
+
+    // FIX: Use stored sleep_score directly if available
+    let db_sleep_score = sqlx::query_scalar::<_, f32>(
+        "SELECT sleep_score FROM sleep_records WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY date DESC LIMIT 1"
+    ).bind(&user.privy_did).fetch_optional(&pool).await?.unwrap_or(0.0) as f64;
+    let final_sleep_score = if db_sleep_score > 0.0 { db_sleep_score } else { sleep_score };
+
+    // FIX: Emotion wellbeing — need at least 5 readings for meaningful score
+    let final_emotion_score = if total_count >= 5 { emotion_score } else { 50.0 }; // neutral if not enough data
+
+    // FIX: ACWR — only use if we have real multi-day data
+    let days_with_activity = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT DATE(timestamp)) FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '7 days'"
+    ).bind(&user.privy_did).fetch_one(&pool).await.unwrap_or(0);
+    let final_acwr = if days_with_activity >= 3 { acwr } else { 1.0 }; // neutral if not enough data
+
+    // FIX: PPI coherence — don't penalize if bracelet doesn't support it
+    let has_ppi_data = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM ppi WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)"
+    ).bind(&user.privy_did).fetch_one(&pool).await.unwrap_or(0);
+    let final_coherence = if has_ppi_data > 0 { coherence as f64 } else { 0.65 }; // neutral if no data
 
     let input = WviV2Input {
         hrv_rmssd: hrv_row.as_ref().and_then(|r| r.0).unwrap_or(50.0) as f64,
         stress_index: hrv_row.as_ref().and_then(|r| r.1).unwrap_or(30.0) as f64,
-        sleep_score,
-        emotion_score,
+        sleep_score: final_sleep_score,
+        emotion_score: final_emotion_score,
         spo2,
         heart_rate: hr,
         resting_hr: 65.0,
         steps,
         active_calories,
-        acwr,
+        acwr: final_acwr,
         bp_systolic: hrv_row.as_ref().and_then(|r| r.2).unwrap_or(120.0) as f64,
         bp_diastolic: hrv_row.as_ref().and_then(|r| r.3).unwrap_or(80.0) as f64,
         temp_delta,
-        ppi_coherence: coherence as f64,
+        ppi_coherence: final_coherence,
         emotion_name,
     };
 
