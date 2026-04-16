@@ -1,5 +1,3 @@
 /target
-.env
-*.swp
-*.swo
-.DS_Store
+docs/qa/__pycache__/
+*.pyc

@@ -412,4 +412,103 @@ mod tests {
             r.all_scores.iter().map(|c| c.emotion).collect();
         assert_eq!(emotions.len(), 18, "all emotions must be unique");
     }
+
+    // ---- Parametric coverage test over 500 synthetic vectors ----
+
+    #[derive(serde::Deserialize)]
+    struct EmotionVectorInput {
+        heart_rate: f64,
+        resting_hr: f64,
+        hrv: f64,
+        stress: f64,
+        spo2: f64,
+        temperature: f64,
+        base_temp: f64,
+        systolic_bp: f64,
+        ppi_coherence: f64,
+        ppi_rmssd: f64,
+        sleep_score: f64,
+        activity_score: f64,
+        hrv_trend: f64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EmotionVector {
+        name: String,
+        expected_primary_category: String,
+        input: EmotionVectorInput,
+        #[allow(dead_code)]
+        tolerance: String,
+    }
+
+    fn primary_category(e: EmotionState) -> &'static str {
+        use EmotionState::*;
+        match e {
+            Calm | Relaxed | Joyful | Energized | Excited | Focused | Meditative | Flow => "positive",
+            Recovering | Drowsy => "neutral",
+            Stressed | Anxious | Angry | Frustrated | Fearful | Sad | Exhausted | Pain => "negative",
+        }
+    }
+
+    #[test]
+    fn all_500_emotion_vectors_produce_finite_results() {
+        let json = include_str!("../../docs/qa/test-vectors/emotion_vectors.json");
+        let vectors: Vec<EmotionVector> =
+            serde_json::from_str(json).expect("emotion vectors should parse");
+
+        assert!(vectors.len() >= 500, "expected 500+ vectors, got {}", vectors.len());
+
+        let mut non_finite = Vec::new();
+        for v in &vectors {
+            let i = &v.input;
+            let r = EmotionEngine::detect(
+                i.heart_rate, i.resting_hr, i.hrv, i.stress, i.spo2,
+                i.temperature, i.base_temp, i.systolic_bp, i.ppi_coherence, i.ppi_rmssd,
+                i.sleep_score, i.activity_score, i.hrv_trend, None, 0.0,
+            );
+            if !r.primary_confidence.is_finite() {
+                non_finite.push(v.name.clone());
+                continue;
+            }
+            assert_eq!(r.all_scores.len(), 18, "{}: not 18 candidates", v.name);
+            for c in &r.all_scores {
+                assert!(c.score.is_finite(), "{} / {:?}: non-finite score", v.name, c.emotion);
+            }
+        }
+        assert!(non_finite.is_empty(), "non-finite primary_confidence in: {:?}", non_finite);
+    }
+
+    #[test]
+    fn emotion_category_accuracy_above_60_percent() {
+        // For each primary-path vector, the engine's pick must land in the
+        // correct wellness category (positive / neutral / negative) for
+        // ≥60% of vectors. This is a coverage test — not clinical accuracy.
+        let json = include_str!("../../docs/qa/test-vectors/emotion_vectors.json");
+        let vectors: Vec<EmotionVector> =
+            serde_json::from_str(json).expect("emotion vectors should parse");
+
+        let mut correct = 0usize;
+        let mut total = 0usize;
+        for v in &vectors {
+            if v.expected_primary_category == "any" || v.expected_primary_category == "unknown" {
+                continue;
+            }
+            total += 1;
+            let i = &v.input;
+            let r = EmotionEngine::detect(
+                i.heart_rate, i.resting_hr, i.hrv, i.stress, i.spo2,
+                i.temperature, i.base_temp, i.systolic_bp, i.ppi_coherence, i.ppi_rmssd,
+                i.sleep_score, i.activity_score, i.hrv_trend, None, 0.0,
+            );
+            if primary_category(r.primary) == v.expected_primary_category {
+                correct += 1;
+            }
+        }
+        let pct = (correct as f64 / total as f64) * 100.0;
+        assert!(
+            pct >= 60.0,
+            "category accuracy {:.1}% below 60% threshold ({} / {})",
+            pct, correct, total
+        );
+    }
 }
