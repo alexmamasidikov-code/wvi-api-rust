@@ -21,8 +21,10 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
     let sleep = sqlx::query_as::<_, (Option<f32>, Option<f32>, Option<f32>)>(
         "SELECT total_hours, deep_percent, efficiency FROM sleep_records WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY date DESC LIMIT 1"
     ).bind(&user.privy_did).fetch_optional(&pool).await?;
+    // Use MAX (not SUM) because bracelet reports CUMULATIVE daily totals, not increments
+    // Each sync sends the same total — SUM would multiply by number of syncs
     let act = sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
-        "SELECT SUM(steps)::float8, SUM(active_minutes)::float8, SUM(calories)::float8 FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= $2"
+        "SELECT MAX(steps)::float8, MAX(active_minutes)::float8, MAX(calories)::float8 FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= $2"
     ).bind(&user.privy_did).bind(Utc::now().date_naive().and_hms_opt(0,0,0).unwrap().and_utc()).fetch_one(&pool).await?;
     let coherence = sqlx::query_as::<_, (Option<f32>,)>("SELECT coherence FROM ppi WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1")
         .bind(&user.privy_did).fetch_optional(&pool).await?.and_then(|r| r.0).unwrap_or(0.4);
@@ -75,13 +77,16 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
 
     let steps = act.0.unwrap_or(0.0);
     let total_calories = act.2.unwrap_or(0.0);
-    // FIX: Subtract BMR to get ACTIVE calories only (~67 kcal/hr BMR)
-    let hours_today = {
-        let now = Utc::now();
-        now.hour() as f64 + now.minute() as f64 / 60.0
+    // Active calories: if bracelet reports total (BMR+active), subtract estimated BMR
+    // If total < 500 kcal, it's likely already active-only from bracelet
+    // Bracelet typically reports active calories directly (not total)
+    let active_calories = if total_calories > 1000.0 {
+        // Likely total calories — subtract BMR estimate
+        (total_calories - 1600.0).max(0.0)
+    } else {
+        // Already active calories from bracelet
+        total_calories
     };
-    let bmr_so_far = hours_today * 67.0; // ~1600 kcal/day BMR
-    let active_calories = (total_calories - bmr_so_far).max(0.0);
 
     // FIX: Use stored sleep_score directly if available
     let db_sleep_score = sqlx::query_scalar::<_, f32>(
@@ -90,13 +95,23 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
     let final_sleep_score = if db_sleep_score > 0.0 { db_sleep_score } else { sleep_score };
 
     // FIX: Emotion wellbeing — need at least 5 readings for meaningful score
-    let final_emotion_score = if total_count >= 5 { emotion_score } else { 50.0 }; // neutral if not enough data
+    // Emotion: need 10+ readings for meaningful score, blend with neutral
+    let final_emotion_score = if total_count >= 10 {
+        emotion_score
+    } else if total_count > 0 {
+        // Blend: partial data → weighted toward neutral (50)
+        let confidence = total_count as f64 / 10.0; // 0.0-1.0
+        emotion_score * confidence + 50.0 * (1.0 - confidence)
+    } else {
+        50.0
+    };
 
     // FIX: ACWR — only use if we have real multi-day data
     let days_with_activity = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT DATE(timestamp)) FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '7 days'"
     ).bind(&user.privy_did).fetch_one(&pool).await.unwrap_or(0);
-    let final_acwr = if days_with_activity >= 3 { acwr } else { 1.0 }; // neutral if not enough data
+    // ACWR needs 7+ days for acute and 28 for chronic. With less data → score = neutral 50
+    let final_acwr = if days_with_activity >= 7 { acwr } else { 1.05 }; // 1.05 → score ~92, not 97
 
     // FIX: PPI coherence — don't penalize if bracelet doesn't support it
     let has_ppi_data = sqlx::query_scalar::<_, i64>(
@@ -111,7 +126,13 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
         emotion_score: final_emotion_score,
         spo2,
         heart_rate: hr,
-        resting_hr: 65.0,
+        // Personal resting HR from 7-day average of lowest readings
+        resting_hr: {
+            let rhr = sqlx::query_scalar::<_, f64>(
+                "SELECT COALESCE(PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY bpm)::float8, 65) FROM heart_rate WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '7 days'"
+            ).bind(&user.privy_did).fetch_one(&pool).await.unwrap_or(65.0);
+            rhr.clamp(45.0, 90.0)
+        },
         steps,
         active_calories,
         acwr: final_acwr,

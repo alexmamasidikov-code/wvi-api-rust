@@ -103,20 +103,24 @@ impl WviV2Calculator {
     }
 
     fn score_spo2(pct: f64) -> f64 {
-        if pct >= 98.0 { 100.0 }
-        else if pct >= 96.0 { 80.0 + (pct - 96.0) / 2.0 * 20.0 }
-        else if pct >= 94.0 { 50.0 + (pct - 94.0) / 2.0 * 30.0 }
-        else if pct >= 92.0 { 20.0 + (pct - 92.0) / 2.0 * 30.0 }
+        // Tighter: 100 only at 100%, 98-99 = 85-95
+        if pct >= 100.0 { 100.0 }
+        else if pct >= 98.0 { 85.0 + (pct - 98.0) / 2.0 * 15.0 }
+        else if pct >= 96.0 { 70.0 + (pct - 96.0) / 2.0 * 15.0 }
+        else if pct >= 94.0 { 45.0 + (pct - 94.0) / 2.0 * 25.0 }
+        else if pct >= 92.0 { 20.0 + (pct - 92.0) / 2.0 * 25.0 }
         else { (pct - 85.0).max(0.0) / 7.0 * 20.0 }
     }
 
     fn score_hr_delta(hr: f64, resting: f64) -> f64 {
+        // Tighter scoring: 100 is nearly impossible, 80 is good
         let delta = (hr - resting).abs();
-        if delta <= 3.0 { 100.0 }
-        else if delta <= 8.0 { 75.0 + (8.0 - delta) / 5.0 * 25.0 }
-        else if delta <= 15.0 { 50.0 + (15.0 - delta) / 7.0 * 25.0 }
-        else if delta <= 25.0 { 25.0 + (25.0 - delta) / 10.0 * 25.0 }
-        else { (40.0 - delta).max(0.0) / 15.0 * 25.0 }
+        if delta <= 1.0 { 90.0 }      // Almost exactly at resting
+        else if delta <= 3.0 { 80.0 }  // Very close to resting
+        else if delta <= 8.0 { 65.0 + (8.0 - delta) / 5.0 * 15.0 }
+        else if delta <= 15.0 { 45.0 + (15.0 - delta) / 7.0 * 20.0 }
+        else if delta <= 25.0 { 20.0 + (25.0 - delta) / 10.0 * 25.0 }
+        else { (40.0 - delta).max(0.0) / 15.0 * 20.0 }
     }
 
     fn score_steps(steps: f64) -> f64 {
@@ -137,7 +141,8 @@ impl WviV2Calculator {
     }
 
     fn score_acwr(ratio: f64) -> f64 {
-        if ratio >= 0.80 && ratio <= 1.30 { 85.0 + (1.0 - (ratio - 1.05).abs() / 0.25) * 15.0 }
+        // Tighter: sweet spot = 75-85, not 85-100
+        if ratio >= 0.80 && ratio <= 1.30 { 70.0 + (1.0 - (ratio - 1.05).abs() / 0.25) * 15.0 }
         else if ratio >= 0.60 && ratio < 0.80 { 60.0 + (ratio - 0.60) / 0.20 * 25.0 }
         else if ratio > 1.30 && ratio <= 1.50 { 50.0 + (1.50 - ratio) / 0.20 * 35.0 }
         else if ratio >= 0.40 && ratio < 0.60 { 30.0 + (ratio - 0.40) / 0.20 * 30.0 }
@@ -157,10 +162,12 @@ impl WviV2Calculator {
     }
 
     fn score_temp(delta: f64) -> f64 {
+        // Tighter: 100 nearly impossible, normal variation = 70-85
         let d = delta.abs();
-        if d <= 0.1 { 100.0 }
-        else if d <= 0.3 { 70.0 + (0.3 - d) / 0.2 * 30.0 }
-        else if d <= 0.5 { 40.0 + (0.5 - d) / 0.2 * 30.0 }
+        if d <= 0.05 { 90.0 }     // Extremely stable
+        else if d <= 0.1 { 80.0 }  // Very stable
+        else if d <= 0.3 { 65.0 + (0.3 - d) / 0.2 * 15.0 }
+        else if d <= 0.5 { 40.0 + (0.5 - d) / 0.2 * 25.0 }
         else if d <= 1.0 { 15.0 + (1.0 - d) / 0.5 * 25.0 }
         else { (2.0 - d).max(0.0) / 1.0 * 15.0 }
     }
