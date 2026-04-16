@@ -9,6 +9,9 @@ pub async fn server_status(State(pool): State<PgPool>) -> AppResult<Json<serde_j
         "data": {
             "status": "healthy",
             "database": if db_ok { "connected" } else { "disconnected" },
+            "poolSize": pool.size(),
+            "poolIdleConnections": pool.num_idle(),
+            "cacheEnabled": true,
             "endpoints": 119,
             "version": "1.0.0",
             "uptime": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),

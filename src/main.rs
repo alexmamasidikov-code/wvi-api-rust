@@ -1,4 +1,5 @@
 mod auth;
+mod cache;
 mod config;
 mod error;
 mod users;
@@ -18,6 +19,8 @@ mod export;
 mod settings;
 mod health;
 mod social;
+
+use cache::AppCache;
 
 use std::sync::Arc;
 use axum::{
@@ -44,13 +47,19 @@ async fn main() {
     let cfg = config::Config::from_env();
 
     // Database pool
+    let max_connections: u32 = std::env::var("MAX_DB_CONNECTIONS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+
     let pool = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(max_connections)
+        .min_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
         .connect(&cfg.database_url)
         .await
         .expect("Failed to connect to database");
 
-    tracing::info!("Connected to database");
+    tracing::info!("Connected to database (max_connections={max_connections})");
 
     // Run migrations
     sqlx::migrate!("./migrations")
@@ -58,33 +67,8 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
-    // Social tables
-    sqlx::query("CREATE TABLE IF NOT EXISTS social_posts (
-        id BIGSERIAL PRIMARY KEY,
-        user_id UUID NOT NULL REFERENCES users(id),
-        content TEXT NOT NULL,
-        likes INT DEFAULT 0,
-        comments INT DEFAULT 0,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    )").execute(&pool).await.ok();
-
-    sqlx::query("CREATE TABLE IF NOT EXISTS challenges (
-        id BIGSERIAL PRIMARY KEY,
-        title TEXT NOT NULL,
-        description TEXT,
-        target_value REAL,
-        start_date DATE,
-        end_date DATE,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    )").execute(&pool).await.ok();
-
-    sqlx::query("CREATE TABLE IF NOT EXISTS challenge_participants (
-        id BIGSERIAL PRIMARY KEY,
-        challenge_id BIGINT REFERENCES challenges(id),
-        user_id UUID REFERENCES users(id),
-        progress REAL DEFAULT 0,
-        joined_at TIMESTAMPTZ DEFAULT NOW()
-    )").execute(&pool).await.ok();
+    // In-memory cache
+    let app_cache = AppCache::new();
 
     // Seed challenges
     sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('10K Steps Daily', 'Walk 10,000 steps every day', 10000, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
@@ -262,6 +246,7 @@ async fn main() {
         .route("/api/v1/health/api-version", get(health::handlers::api_version))
         .route("/api/v1/docs.json", get(health::handlers::docs_json))
 
+        .layer(Extension(app_cache))
         .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
