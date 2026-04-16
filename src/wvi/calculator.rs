@@ -245,6 +245,16 @@ impl WviV2Calculator {
             ("ppi".into(), Self::score_ppi(input.ppi_coherence)),
         ];
 
+        // Apply per-metric caps for estimated/neutral values
+        let scores: Vec<(String, f64)> = scores.into_iter().map(|(k, v)| {
+            let capped = match k.as_str() {
+                "bp" => v.min(85.0),    // estimated, not measured
+                "ppi" => v.min(70.0),   // if no real PPI data
+                _ => v,
+            };
+            (k, capped)
+        }).collect();
+
         // Step 2: Evaluate hard caps
         let mut active_caps = Vec::new();
         let mut cap_ceiling = 100.0_f64;

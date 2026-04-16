@@ -88,6 +88,22 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
         total_calories
     };
 
+    // Time-proportional scaling: adjust targets based on hours elapsed today
+    let now = Utc::now();
+    let hours_elapsed = now.hour() as f64 + now.minute() as f64 / 60.0;
+    let waking_hours = 16.0; // assume 16 waking hours (6am-10pm)
+    // Adjust: if before 6am, consider it "yesterday's end"
+    let day_progress = if hours_elapsed < 6.0 {
+        1.0 // full day (still yesterday's data)
+    } else {
+        ((hours_elapsed - 6.0) / waking_hours).clamp(0.05, 1.0)
+    };
+
+    // Project to full day, but cap so morning data doesn't wildly inflate
+    // max 3x actual OR absolute cap (15K steps, 2000 cal)
+    let adjusted_steps = (steps / day_progress).min(steps * 3.0).min(15000.0);
+    let adjusted_calories = (active_calories / day_progress).min(active_calories * 3.0).min(2000.0);
+
     // FIX: Use stored sleep_score directly if available
     let db_sleep_score = sqlx::query_scalar::<_, f32>(
         "SELECT sleep_score FROM sleep_records WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY date DESC LIMIT 1"
@@ -133,8 +149,8 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
             ).bind(&user.privy_did).fetch_one(&pool).await.unwrap_or(65.0);
             rhr.clamp(45.0, 90.0)
         },
-        steps,
-        active_calories,
+        steps: adjusted_steps,
+        active_calories: adjusted_calories,
         acwr: final_acwr,
         bp_systolic: hrv_row.as_ref().and_then(|r| r.2).unwrap_or(120.0) as f64,
         bp_diastolic: hrv_row.as_ref().and_then(|r| r.3).unwrap_or(80.0) as f64,
