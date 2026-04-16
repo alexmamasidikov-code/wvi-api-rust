@@ -3,6 +3,8 @@ use sqlx::PgPool;
 use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
 use super::cli::{ask_or_fallback, AiEndpointKind};
+use super::context_builder::build_full_context;
+use super::prompt_rules::WELLEX_SYSTEM_PROMPT;
 
 // ─── Biometric context fetched from DB ───────────────────────────────────────
 
@@ -148,10 +150,14 @@ fn format_biometric_context(ctx: &BiometricContext) -> String {
 // See `super::cli` module for the CLI wrapper.
 
 async fn call_claude(pool: &PgPool, privy_did: &str, kind: AiEndpointKind, prompt: &str) -> String {
-    let ctx = fetch_biometrics(pool, privy_did).await;
-    let bio_context = format_biometric_context(&ctx);
+    // Rich multi-day DB context — 7-day averages + sleep history + WVI
+    // trend + emotion distribution. Claude makes much better calls with
+    // this than with a single snapshot.
+    let db_context = build_full_context(pool, privy_did).await;
 
-    // Compute derived metrics for richer AI context
+    // Quick derived metrics from latest snapshot (keep for backward-compat
+    // with existing formatting; the full_context already includes values).
+    let ctx = fetch_biometrics(pool, privy_did).await;
     let heart_rate = ctx.heart_rate.unwrap_or(70.0) as f64;
     let hrv = ctx.hrv_rmssd.unwrap_or(50.0) as f64;
     let spo2 = ctx.spo2.unwrap_or(98.0) as f64;
@@ -162,53 +168,19 @@ async fn call_claude(pool: &PgPool, privy_did: &str, kind: AiEndpointKind, promp
     let coherence = crate::biometrics::computed::compute_coherence(hrv);
     let bio_age = crate::biometrics::computed::compute_bio_age(30.0, heart_rate, hrv, spo2, steps, 75.0);
 
-    let mut computed_parts = vec!["Computed estimates:".to_string()];
-    computed_parts.push(format!("- Estimated BP: {:.0}/{:.0} mmHg", sys, dia));
-    computed_parts.push(format!("- Estimated VO2 Max: {:.1} ml/kg/min", vo2));
-    computed_parts.push(format!("- Cardiac Coherence: {:.0}%", coherence));
-    computed_parts.push(format!("- Estimated Bio Age: {:.0} years", bio_age));
+    let mut computed_parts = vec!["### Computed estimates".to_string()];
+    computed_parts.push(format!("- Estimated BP: **{:.0}/{:.0} mmHg**", sys, dia));
+    computed_parts.push(format!("- Estimated VO2 Max: **{:.1} ml/kg/min**", vo2));
+    computed_parts.push(format!("- Cardiac Coherence: **{:.0}%**", coherence));
+    computed_parts.push(format!("- Estimated Bio Age: **{:.0} years**", bio_age));
     let computed_context = computed_parts.join("\n");
 
-    let system_prompt = format!(
-        r#"You are Wellex AI — a personal wellness intelligence assistant inside the Wellex health app.
-
-## Your Role
-- You analyze real-time biometric data from the user's Wellex bracelet (JCV8)
-- You provide personalized, evidence-based health insights
-- You speak confidently but add disclaimers for medical concerns
-- You are warm, supportive, and actionable — never alarmist
-- You reference specific numbers from the user's data
-- Respond in 3-5 sentences. Use bullet points for lists.
-
-## WVI Score System
-- WVI (Wellness Vitality Index) is 0-100, calculated from 10 components:
-  HRV (18%), Stress (15%), Sleep (13%), Emotion (12%), SpO2 (9%), HR (9%), Activity (8%), BP (6%), Temp (5%), PPI (5%)
-- Levels: Superb (90+), Excellent (80-89), Good (65-79), Moderate (50-64), Attention (35-49), Critical (20-34), Dangerous (<20)
-
-## 18 Emotional States
-Wellex detects emotions via fuzzy logic: Calm, Relaxed, Joyful, Energized, Excited, Focused, Flow, Meditative, Recovering, Drowsy, Sad, Anxious, Stressed, Frustrated, Angry, Fearful, Exhausted, Pain
-
-## Key Metric Ranges
-- HR: 60-80 bpm (rest optimal), >100 elevated
-- HRV: >50ms good, >70ms excellent, <20ms poor
-- SpO2: >95% normal, <90% critical
-- Stress: 0-25 low, 25-50 moderate, 50-75 high, 75-100 very high
-- Recovery: based on morning HRV vs 7-day baseline
-- Bio Age: calculated from all metrics over 7 days
-
-## Current User Data
-{}
-
-{}"#,
-        bio_context, computed_context
+    // Final prompt: system rules + multi-day context + computed + task prompt.
+    let full_prompt = format!(
+        "{}\n\n---\n\n{}\n\n{}\n\n---\n\n## Task\n\n{}",
+        WELLEX_SYSTEM_PROMPT, db_context, computed_context, prompt
     );
 
-    // Assemble the full prompt: system + user question. Claude CLI reads a
-    // single combined prompt from stdin/argv — no separate system/user roles.
-    let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, prompt);
-
-    // ask_or_fallback never panics; on CLI error it returns the per-endpoint
-    // static fallback text so iOS always gets something renderable.
     ask_or_fallback(kind, &full_prompt).await
 }
 
@@ -297,5 +269,137 @@ pub async fn genius_layer(
 ) -> AppResult<Json<serde_json::Value>> {
     let prompt = "You are the Genius Layer — provide the deepest analysis possible. Connect ALL signals:\n1) How HR + HRV + Stress interact (autonomic nervous system state)\n2) How SpO2 + Temperature + Activity relate (metabolic state)\n3) How Emotional state connects to physiological data\n4) What the WVI score + Bio Age reveal about long-term trajectory\n5) One non-obvious insight that connects 3+ metrics\nBe specific with numbers. This is the premium analysis.";
     let text = call_claude(&pool, &user.privy_did, AiEndpointKind::GeniusLayer, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+// ─── AI Coach 2.0 (proactive) ────────────────────────────────────────────────
+
+pub async fn daily_brief(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(_body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let prompt = "Write a 3-sentence morning brief for this user. Start with a 🌅 emoji. \
+        Open with one observation about their overnight recovery (HRV vs baseline / sleep \
+        quality). Follow with the single most valuable action they should take today. \
+        Close with a concrete intensity ceiling for training (or 'rest day' if HRV is \
+        significantly below baseline). Tone: warm coach, not clinical.";
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::DailyBrief, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+pub async fn evening_review(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(_body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let prompt = "Write a short evening review: \
+        1) **What went right today** (one sentence, cite a metric). \
+        2) **What could improve** (one sentence, cite a metric). \
+        3) **Tonight's wind-down** (one specific action: bedtime target, breathing \
+        pattern, or caffeine/light discipline). \
+        Keep it under 100 words. Warm, supportive.";
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::EveningReview, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+pub async fn anomaly_alert(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let metric = body.get("metric").and_then(|v| v.as_str()).unwrap_or("a biometric signal");
+    let direction = body.get("direction").and_then(|v| v.as_str()).unwrap_or("shifted");
+    let delta = body.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let prompt = format!(
+        "A significant change was detected: **{}** {} by {:.1}% vs the user's 7-day baseline. \
+        Write a 2-sentence push-notification body (max 140 chars): \
+        explain what this likely means physiologically + one immediate action. \
+        No emoji. No alarmism. If the change is within normal daily variation, say so briefly.",
+        metric, direction, delta.abs()
+    );
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::AnomalyAlert, &prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+pub async fn weekly_deep(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(_body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let prompt = "Produce the Sunday weekly deep analysis, 5 sections: \
+        1) **WVI summary**: trend + biggest contributor + biggest drag (cite numbers). \
+        2) **Sleep architecture**: average duration, deep/REM percentages vs targets. \
+        3) **Autonomic balance**: HRV trend vs stress; recovery pattern. \
+        4) **Activity + recovery load**: ACWR, training response, overreach risk. \
+        5) **Next week's focus**: 1-3 SMART goals derived from this week's gaps. \
+        Use Markdown headers. This is the premium weekly report.";
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::WeeklyDeep, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+// ─── Medical-analyst tier ───────────────────────────────────────────────────
+
+pub async fn full_analysis(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(_body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let prompt = "You are performing a **complete medical-analyst review** of this user's \
+        recent biometric data. Use the full dossier provided (latest snapshot, 7-day averages, \
+        sleep architecture, WVI trend + per-metric breakdown, emotion distribution, ECG sessions, \
+        activity today). \
+        \n\n\
+        Produce the report in this structure: \
+        \n## Cardiovascular\n(HR, HRV, BP estimate, resting HR trend, any irregular patterns) \
+        \n## Respiration & metabolic\n(SpO2, breathing rate, temperature, VO2 Max) \
+        \n## Autonomic / stress\n(HRV vs baseline, stress index pattern, PPI coherence) \
+        \n## Sleep & recovery\n(duration, phase distribution, efficiency, debt) \
+        \n## Activity & training\n(steps, active minutes, ACWR, overreach risk) \
+        \n## Emotional signature\n(primary + secondary emotions, correlations with physiology) \
+        \n## ECG findings\n(if recent ECG: rate, rhythm hints, any flags) \
+        \n## Three highest-leverage actions\n(specific, numeric, ordered by impact) \
+        \nCite real numbers everywhere. Flag anything outside reference range. Add a brief \
+        professional-help note only if genuinely warranted (per system rules).";
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::FullAnalysis, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+pub async fn ecg_interpret(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(_body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let prompt = "Interpret the user's most recent ECG session. Cover: \
+        1) **Rate**: what the HR during the recording tells you (resting vs activity). \
+        2) **Rhythm quality**: regular vs irregular signatures based on the analysis JSON \
+        blob in the dossier. \
+        3) **PPI coherence**: cardiac coherence reading and what it suggests about autonomic \
+        tone. \
+        4) **Integration**: how this ECG fits with today's HRV, stress, and emotional state. \
+        5) **Action**: what to track next (re-measure after a specific activity / at a \
+        specific time of day). \
+        \n\n\
+        If the ECG analysis blob is missing or the recording too short for confident analysis, \
+        say so explicitly and suggest a fresh 60-second measurement with the Wellex bracelet.";
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::EcgInterpret, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+pub async fn recovery_deep(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(_body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let prompt = "Produce a deep recovery analysis: \
+        1) **Current recovery state**: % based on morning HRV vs 7-day baseline + previous \
+        night's sleep score + stress trend. \
+        2) **Autonomic balance**: parasympathetic vs sympathetic read based on HRV trajectory. \
+        3) **Sleep contribution**: deep + REM percentages vs targets; note if debt is building. \
+        4) **Training readiness**: green/yellow/red with specific intensity ceiling. \
+        5) **Recovery prescription**: 3 concrete actions for the next 24h ordered by impact. \
+        \nBe specific with numbers. If recovery data is sparse, say what's missing \
+        (e.g. 'need one more night of sleep tracking').";
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::RecoveryDeep, prompt).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }

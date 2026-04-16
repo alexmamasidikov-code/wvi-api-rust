@@ -222,6 +222,15 @@ async fn main() {
         .route("/api/v1/ai/action-plan", post(ai::handlers::action_plan))
         .route("/api/v1/ai/insights", post(ai::handlers::insights))
         .route("/api/v1/ai/genius-layer", post(ai::handlers::genius_layer))
+        // AI Coach 2.0 proactive
+        .route("/api/v1/ai/daily-brief", post(ai::handlers::daily_brief))
+        .route("/api/v1/ai/evening-review", post(ai::handlers::evening_review))
+        .route("/api/v1/ai/anomaly-alert", post(ai::handlers::anomaly_alert))
+        .route("/api/v1/ai/weekly-deep", post(ai::handlers::weekly_deep))
+        // Medical-analyst tier
+        .route("/api/v1/ai/full-analysis", post(ai::handlers::full_analysis))
+        .route("/api/v1/ai/ecg-interpret", post(ai::handlers::ecg_interpret))
+        .route("/api/v1/ai/recovery-deep", post(ai::handlers::recovery_deep))
 
         // ═══ REPORTS (5) ═══
         .route("/api/v1/reports/generate", post(reports::handlers::generate))

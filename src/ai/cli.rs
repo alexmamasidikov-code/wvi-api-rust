@@ -46,10 +46,19 @@ pub enum AiEndpointKind {
     ActionPlan,
     Insights,
     GeniusLayer,
+    // AI Coach 2.0 — proactive / scheduled analyses.
+    DailyBrief,
+    EveningReview,
+    AnomalyAlert,
+    WeeklyDeep,
+    // Medical-analyst level
+    FullAnalysis,
+    EcgInterpret,
+    RecoveryDeep,
 }
 
 impl AiEndpointKind {
-    fn fallback_text(self) -> &'static str {
+    pub fn fallback_text(self) -> &'static str {
         match self {
             Self::Interpret =>
                 "Your metrics are being analyzed. Core vitals (HR, HRV, SpO2) look within \
@@ -72,6 +81,27 @@ impl AiEndpointKind {
                 "Your biometric trend is stable. A full insight report is being prepared.",
             Self::GeniusLayer =>
                 "Cross-metric correlations are loading. Your overall pattern looks balanced.",
+            Self::DailyBrief =>
+                "Good morning. Your recovery is tracking normally. Start the day with 5 minutes \
+                of morning sunlight and steady hydration. Detailed AI brief resumes shortly.",
+            Self::EveningReview =>
+                "Evening check-in: a balanced day overall. Wind down with 4-7-8 breathing and \
+                aim for 7-9 hours of sleep. Personalized recap will be ready next session.",
+            Self::AnomalyAlert =>
+                "A small biometric shift was detected. Nothing alarming — your body is adapting. \
+                Observation continues; a detailed explanation will follow.",
+            Self::WeeklyDeep =>
+                "Your weekly analysis is being compiled. Trends across HR, HRV, sleep, stress, \
+                and activity are looking balanced. Full report will arrive shortly.",
+            Self::FullAnalysis =>
+                "Full medical analyst report is loading. All core signals (HR, HRV, SpO2, \
+                sleep, activity, emotion) will be integrated into a single report shortly.",
+            Self::EcgInterpret =>
+                "ECG interpretation is loading. Your last recording will be analyzed for \
+                rhythm, coherence, and any rate irregularities.",
+            Self::RecoveryDeep =>
+                "Recovery analysis loading. Your HRV vs baseline + sleep quality + stress \
+                trend are being evaluated.",
         }
     }
 }
@@ -182,6 +212,13 @@ mod tests {
             AiEndpointKind::ActionPlan,
             AiEndpointKind::Insights,
             AiEndpointKind::GeniusLayer,
+            AiEndpointKind::DailyBrief,
+            AiEndpointKind::EveningReview,
+            AiEndpointKind::AnomalyAlert,
+            AiEndpointKind::WeeklyDeep,
+            AiEndpointKind::FullAnalysis,
+            AiEndpointKind::EcgInterpret,
+            AiEndpointKind::RecoveryDeep,
         ] {
             let t = kind.fallback_text();
             assert!(!t.is_empty(), "fallback text for {:?} should not be empty", kind);
