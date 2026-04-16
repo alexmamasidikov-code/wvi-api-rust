@@ -56,6 +56,27 @@ services:
       timeout: 5s
       retries: 3
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wvi-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: wvi-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=wellex
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
+  grafana_data:

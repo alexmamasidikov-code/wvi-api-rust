@@ -2,6 +2,7 @@ mod auth;
 mod cache;
 mod config;
 mod error;
+mod metrics;
 mod users;
 mod biometrics;
 mod wvi;
@@ -21,6 +22,7 @@ mod health;
 mod social;
 
 use cache::AppCache;
+use metrics::Metrics;
 
 use std::sync::Arc;
 use axum::{
@@ -73,6 +75,9 @@ async fn main() {
 
     // In-memory cache
     let app_cache = AppCache::new();
+
+    // Metrics collector
+    let app_metrics = Metrics::new();
 
     // Seed challenges
     sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('10K Steps Daily', 'Walk 10,000 steps every day', 10000, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
@@ -252,7 +257,14 @@ async fn main() {
         .route("/api/v1/health/live", get(health::handlers::liveness))
         .route("/api/v1/docs.json", get(health::handlers::docs_json))
 
+        // ═══ METRICS (Prometheus) ═══
+        .route("/metrics", get({
+            let m = app_metrics.clone();
+            move || async move { m.to_prometheus() }
+        }))
+
         .layer(Extension(app_cache))
+        .layer(Extension(app_metrics))
         .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -305,6 +317,11 @@ async fn rate_limit_middleware(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
+    // Increment total request counter
+    if let Some(m) = req.extensions().get::<Metrics>() {
+        m.requests_total.fetch_add(1, Ordering::Relaxed);
+    }
 
     let window = state.window_start.load(Ordering::Relaxed);
     if now > window {
