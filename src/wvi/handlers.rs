@@ -34,15 +34,38 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
         "SELECT primary_emotion FROM emotions WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1"
     ).bind(&user.privy_did).fetch_optional(&pool).await?.map(|r| r.0).unwrap_or_default();
 
-    // Compute emotion wellbeing score from 24h positive ratio
-    let positive_count = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM emotions WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '24 hours' AND primary_emotion IN ('calm','relaxed','joyful','energized','excited','focused','meditative','flow')"
-    ).bind(&user.privy_did).fetch_one(&pool).await?.0;
-    let total_count = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM emotions WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '24 hours'"
-    ).bind(&user.privy_did).fetch_one(&pool).await?.0;
+    // Compute emotion wellbeing score — WEIGHTED by emotion quality, not binary positive/negative
+    // Each emotion has a wellbeing score: flow=95, joyful=90, energized=85, relaxed=80,
+    // meditative=80, focused=65, calm=60, recovering=50, drowsy=40, frustrated=30,
+    // stressed=25, sad=20, anxious=15, angry=10, fearful=10, exhausted=10, pain=5
+    let emotion_rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT primary_emotion, COUNT(*) FROM emotions WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '24 hours' GROUP BY primary_emotion"
+    ).bind(&user.privy_did).fetch_all(&pool).await?;
+
+    let total_count: i64 = emotion_rows.iter().map(|r| r.1).sum();
     let emotion_score = if total_count > 0 {
-        (positive_count as f64 / total_count as f64 * 100.0).clamp(0.0, 100.0)
+        let weighted_sum: f64 = emotion_rows.iter().map(|r| {
+            let weight = match r.0.as_str() {
+                "flow" => 95.0,
+                "joyful" => 90.0,
+                "energized" | "excited" => 85.0,
+                "relaxed" => 80.0,
+                "meditative" => 80.0,
+                "focused" => 65.0,       // focused is NEUTRAL, not highly positive
+                "calm" => 60.0,          // calm is baseline, not excellent
+                "recovering" => 50.0,
+                "drowsy" => 40.0,
+                "frustrated" => 30.0,
+                "stressed" => 25.0,
+                "sad" => 20.0,
+                "anxious" => 15.0,
+                "angry" | "fearful" => 10.0,
+                "exhausted" | "pain" => 5.0,
+                _ => 50.0,
+            };
+            weight * r.1 as f64
+        }).sum();
+        (weighted_sum / total_count as f64).clamp(0.0, 100.0)
     } else {
         50.0
     };
