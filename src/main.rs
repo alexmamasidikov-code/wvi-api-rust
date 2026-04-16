@@ -21,6 +21,7 @@ mod settings;
 mod health;
 mod social;
 mod audit;
+mod events;
 
 use cache::AppCache;
 use metrics::Metrics;
@@ -88,6 +89,26 @@ async fn main() {
     sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('10K Steps Daily', 'Walk 10,000 steps every day', 10000, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
     sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('Sleep Score 80+', 'Achieve sleep score above 80 for a week', 80, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
     sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('HRV Improvement', 'Improve your HRV by 10% this week', 10, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
+
+    // Kafka event bus
+    let event_bus = match std::env::var("KAFKA_BROKERS") {
+        Ok(brokers) => {
+            match events::EventBus::new(&brokers) {
+                Ok(bus) => {
+                    tracing::info!("Kafka event bus connected to {brokers}");
+                    bus
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to connect to Kafka at {brokers}: {e} — using noop event bus");
+                    events::EventBus::noop()
+                }
+            }
+        }
+        Err(_) => {
+            tracing::warn!("KAFKA_BROKERS not set — using noop event bus");
+            events::EventBus::noop()
+        }
+    };
 
     // Privy client
     let privy = Arc::new(PrivyClient::new(
@@ -274,6 +295,7 @@ async fn main() {
             move || async move { m.to_prometheus() }
         }))
 
+        .layer(Extension(event_bus))
         .layer(Extension(app_cache))
         .layer(Extension(app_metrics))
         .layer(Extension(privy))

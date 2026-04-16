@@ -1,9 +1,10 @@
-use axum::{extract::{Query, State}, Json};
+use axum::{extract::{Query, State}, Extension, Json};
 use chrono::{Utc, Duration};
 use sqlx::PgPool;
 use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
 use crate::emotions::engine::EmotionEngine;
+use crate::events::{EventBus, BiometricEvent, TOPIC_BIOMETRICS};
 use super::models::*;
 
 fn default_from() -> chrono::DateTime<Utc> {
@@ -528,7 +529,7 @@ pub async fn get_summary(user: AuthUser, State(pool): State<PgPool>) -> AppResul
 }
 
 // ═══ BULK SYNC ═══
-pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<SyncRequest>) -> AppResult<Json<serde_json::Value>> {
+pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bus): Extension<EventBus>, Json(body): Json<SyncRequest>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let mut processed = 0i64;
     let received = body.records.len();
@@ -873,6 +874,21 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
         Some(serde_json::json!({ "recordsReceived": received, "recordsProcessed": processed })),
         None, None,
     ).await;
+
+    // Publish biometric sync event to Kafka
+    if processed > 0 {
+        let event = BiometricEvent {
+            user_id: uid.to_string(),
+            event_type: "biometrics.sync".to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            data: serde_json::json!({
+                "records_received": received,
+                "records_processed": processed,
+                "device_id": &body.device_id,
+            }),
+        };
+        event_bus.publish(TOPIC_BIOMETRICS, &uid.to_string(), &event).await;
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,

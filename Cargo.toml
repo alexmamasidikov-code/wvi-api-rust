@@ -57,3 +57,6 @@ csv = "1"
 
 # Rand (for simulations)
 rand = "0.9"
+
+# Kafka
+rdkafka = { version = "0.36", features = ["cmake-build"] }
