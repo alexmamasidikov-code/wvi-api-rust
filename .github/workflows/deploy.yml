@@ -1,0 +1,50 @@
+name: Deploy to VPS
+
+# Auto-deploys the Rust API to production on every push to master.
+# Requires repo secret VPS_SSH_KEY (private key with authorized_keys
+# entry on the VPS). Public key goes into ~/.ssh/authorized_keys on
+# root@100.90.71.111.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H 100.90.71.111 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run deploy script on VPS
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=accept-new root@100.90.71.111 '
+            set -e
+            cd ~/wvi-api-rust || cd /opt/wvi-api-rust
+            git fetch origin
+            git reset --hard origin/master
+            docker compose build api
+            docker compose up -d --no-deps api
+            sleep 5
+            curl -sf http://localhost:8091/api/v1/health/server-status > /dev/null && echo "Deploy OK"
+          '
+
+      - name: Smoke test production
+        run: |
+          sleep 10
+          for ep in daily-brief full-analysis recovery-deep; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer dev-token" \
+              -H "Content-Type: application/json" \
+              -d '{}' \
+              "https://6ssssdj5s38h.share.zrok.io/api/v1/ai/$ep")
+            echo "  $code /api/v1/ai/$ep"
+          done
