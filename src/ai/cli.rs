@@ -59,6 +59,26 @@ pub enum AiEndpointKind {
 }
 
 impl AiEndpointKind {
+    /// Stable lowercase identifier — used as part of the cache key.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interpret => "interpret",
+            Self::Recommendations => "recommendations",
+            Self::Chat => "chat",
+            Self::ExplainMetric => "explain_metric",
+            Self::ActionPlan => "action_plan",
+            Self::Insights => "insights",
+            Self::GeniusLayer => "genius_layer",
+            Self::DailyBrief => "daily_brief",
+            Self::EveningReview => "evening_review",
+            Self::AnomalyAlert => "anomaly_alert",
+            Self::WeeklyDeep => "weekly_deep",
+            Self::FullAnalysis => "full_analysis",
+            Self::EcgInterpret => "ecg_interpret",
+            Self::RecoveryDeep => "recovery_deep",
+        }
+    }
+
     pub fn fallback_text(self) -> &'static str {
         match self {
             Self::Interpret =>

@@ -82,6 +82,12 @@ async fn main() {
     // In-memory cache
     let app_cache = AppCache::new();
 
+    // Background AI panel prewarmer — keeps daily_brief / recovery_deep /
+    // full_analysis / ecg_interpret / evening_review / weekly_deep cached
+    // for every user with recent biometric activity. Users tapping a card
+    // get instant responses instead of waiting 20-40 s for the CLI.
+    ai::precompute::spawn_prewarmer(pool.clone(), app_cache.clone());
+
     // Metrics collector
     let app_metrics = Metrics::new();
 
