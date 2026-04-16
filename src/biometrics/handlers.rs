@@ -387,8 +387,10 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
 
     let steps = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(steps)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'")
         .bind(uid).fetch_one(&pool).await? as f64;
-    let active_min = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(active_minutes)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'")
-        .bind(uid).fetch_one(&pool).await? as f64;
+    let active_min_raw = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(active_minutes)::bigint, 0) FROM activity WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '24 hours'"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
+    let active_min = (active_min_raw as f64).min(120.0);
 
     // Fetch latest sleep data for sleep score
     let sleep_row = sqlx::query_as::<_, (Option<f32>, Option<f32>, Option<f32>, Option<f32>)>(

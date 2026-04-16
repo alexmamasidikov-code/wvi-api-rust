@@ -49,24 +49,25 @@ pub fn compute_sleep_score(deep_pct: f64, rem_pct: f64, duration_hours: f64, awa
 /// Lower HR, higher HRV, higher SpO2, more activity → younger bio age
 pub fn compute_bio_age(chronological_age: f64, hr: f64, hrv: f64, spo2: f64, steps: f64, sleep_score: f64) -> f64 {
     let mut bio_age = chronological_age;
-    // HRV bonus: each 10ms above 50 = -1 year
-    bio_age -= ((hrv - 50.0) / 10.0).clamp(-5.0, 5.0);
-    // Resting HR: each 5bpm below 70 = -0.5 year
-    bio_age -= ((70.0 - hr) / 5.0 * 0.5).clamp(-3.0, 3.0);
-    // Activity: 10k steps = -2 years
-    bio_age -= (steps / 10000.0 * 2.0).clamp(0.0, 3.0);
-    // SpO2: below 95 = +2 years
-    if spo2 > 0.0 && spo2 < 95.0 { bio_age += 2.0; }
-    // Sleep: good sleep = -1 year
-    bio_age -= ((sleep_score - 50.0) / 50.0).clamp(-1.0, 1.0);
-
+    // HRV: each 10ms above 50 = -0.5 year (was -1, too aggressive)
+    bio_age -= ((hrv - 50.0) / 10.0 * 0.5).clamp(-3.0, 3.0);
+    // HR: each 5bpm below 70 = -0.3 year (was -0.5)
+    bio_age -= ((70.0 - hr) / 5.0 * 0.3).clamp(-2.0, 2.0);
+    // Activity: 10k steps = -1 year (was -2)
+    bio_age -= (steps / 10000.0 * 1.0).clamp(0.0, 2.0);
+    // SpO2 penalty
+    if spo2 > 0.0 && spo2 < 95.0 { bio_age += 1.5; }
+    // Sleep: good sleep = -0.5 year (was -1)
+    bio_age -= ((sleep_score - 50.0) / 50.0 * 0.5).clamp(-1.0, 1.0);
     bio_age.clamp(18.0, 120.0).round()
 }
 
 /// Compute training load from recent activity
 /// TRIMP-based: duration × HR intensity
 pub fn compute_training_load(active_minutes: f64, avg_hr: f64, hr_max: f64) -> f64 {
+    // Cap active minutes to realistic daily max (don't use cumulative)
+    let daily_active = active_minutes.min(120.0); // max 2 hours per day
     let intensity = (avg_hr / hr_max).clamp(0.0, 1.0);
-    let trimp = active_minutes * intensity * intensity;
-    trimp.clamp(0.0, 500.0).round()
+    let trimp = daily_active * intensity * intensity;
+    trimp.clamp(0.0, 200.0).round() // max 200 TRIMP per day
 }
