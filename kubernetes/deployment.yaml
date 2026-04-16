@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wvi-api
+  labels:
+    app: wvi-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: wvi-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: wvi-api
+    spec:
+      containers:
+        - name: wvi-api
+          image: wvi-api:latest
+          ports:
+            - containerPort: 8091
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: wvi-secrets
+                  key: database-url
+            - name: PORT
+              value: "8091"
+            - name: RUST_LOG
+              value: "info"
+            - name: MAX_DB_CONNECTIONS
+              value: "50"
+            - name: CLAUDE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wvi-secrets
+                  key: claude-api-key
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: 8091
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 8091
+            initialDelaySeconds: 5
+            periodSeconds: 10

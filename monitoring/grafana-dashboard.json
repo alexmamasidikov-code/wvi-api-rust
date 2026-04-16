@@ -1,0 +1,32 @@
+{
+  "dashboard": {
+    "title": "WVIHealth API",
+    "panels": [
+      {
+        "title": "Requests/sec",
+        "type": "graph",
+        "targets": [{"expr": "rate(wvi_requests_total[1m])"}]
+      },
+      {
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [{"expr": "rate(wvi_requests_error[1m]) / rate(wvi_requests_total[1m])"}]
+      },
+      {
+        "title": "WVI Calculations",
+        "type": "stat",
+        "targets": [{"expr": "wvi_calculations_total"}]
+      },
+      {
+        "title": "Emotion Detections",
+        "type": "stat",
+        "targets": [{"expr": "wvi_emotion_detections_total"}]
+      },
+      {
+        "title": "Uptime",
+        "type": "stat",
+        "targets": [{"expr": "wvi_uptime_seconds"}]
+      }
+    ]
+  }
+}
