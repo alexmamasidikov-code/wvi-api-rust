@@ -328,3 +328,151 @@ impl WviV2Calculator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_input() -> WviV2Input {
+        WviV2Input {
+            hrv_rmssd: 55.0,
+            stress_index: 35.0,
+            sleep_score: 78.0,
+            emotion_score: 75.0,
+            spo2: 98.0,
+            heart_rate: 72.0,
+            resting_hr: 65.0,
+            steps: 8000.0,
+            active_calories: 350.0,
+            acwr: 1.1,
+            bp_systolic: 118.0,
+            bp_diastolic: 76.0,
+            temp_delta: 0.0,
+            ppi_coherence: 0.65,
+            emotion_name: "calm".to_string(),
+        }
+    }
+
+    #[test]
+    fn excellent_metrics_yield_high_score() {
+        let input = WviV2Input {
+            hrv_rmssd: 90.0,
+            stress_index: 15.0,
+            sleep_score: 95.0,
+            emotion_score: 95.0,
+            spo2: 99.0,
+            heart_rate: 60.0,
+            resting_hr: 58.0,
+            active_calories: 550.0,
+            steps: 12000.0,
+            emotion_name: "flow".to_string(),
+            ..default_input()
+        };
+        let result = WviV2Calculator::calculate(&input);
+        assert!(result.wvi_score > 85.0, "WVI should be > 85, got {}", result.wvi_score);
+        assert!(result.emotion_multiplier > 1.10);
+    }
+
+    #[test]
+    fn terrible_metrics_yield_low_score() {
+        let input = WviV2Input {
+            hrv_rmssd: 15.0,
+            stress_index: 90.0,
+            sleep_score: 20.0,
+            emotion_score: 20.0,
+            spo2: 88.0,
+            heart_rate: 110.0,
+            resting_hr: 65.0,
+            emotion_name: "exhausted".to_string(),
+            ..default_input()
+        };
+        let result = WviV2Calculator::calculate(&input);
+        assert!(result.wvi_score < 45.0, "WVI should be < 45, got {}", result.wvi_score);
+        assert!(result.emotion_multiplier < 0.80);
+    }
+
+    #[test]
+    fn score_always_clamped_to_0_100() {
+        let result = WviV2Calculator::calculate(&default_input());
+        assert!(result.wvi_score >= 0.0 && result.wvi_score <= 100.0);
+
+        let mut bad = default_input();
+        bad.hrv_rmssd = -100.0;
+        bad.heart_rate = 500.0;
+        let r = WviV2Calculator::calculate(&bad);
+        assert!(r.wvi_score >= 0.0 && r.wvi_score <= 100.0);
+    }
+
+    #[test]
+    fn formula_version_is_2() {
+        let result = WviV2Calculator::calculate(&default_input());
+        assert_eq!(result.formula_version, "2.0");
+    }
+
+    #[test]
+    fn weakest_metric_is_identified() {
+        let input = WviV2Input {
+            spo2: 75.0,
+            hrv_rmssd: 70.0,
+            sleep_score: 85.0,
+            ..default_input()
+        };
+        let result = WviV2Calculator::calculate(&input);
+        assert!(!result.weakest_metric.is_empty());
+        assert!(!result.improvement_tip.is_empty());
+    }
+
+    #[test]
+    fn metric_scores_include_all_12_components() {
+        let result = WviV2Calculator::calculate(&default_input());
+        let expected_keys = [
+            "hrv", "stress", "sleep", "emotion", "spo2", "heart_rate",
+            "steps", "calories", "acwr", "bp", "temp", "ppi",
+        ];
+        for key in expected_keys.iter() {
+            assert!(
+                result.metric_scores.contains_key(*key),
+                "Missing metric score for {}", key
+            );
+        }
+    }
+
+    #[test]
+    fn emotion_multiplier_applies_correctly() {
+        let mut input = default_input();
+        input.emotion_name = "flow".to_string();
+        let flow = WviV2Calculator::calculate(&input);
+        assert!((flow.emotion_multiplier - 1.15).abs() < 0.001);
+
+        input.emotion_name = "pain".to_string();
+        let pain = WviV2Calculator::calculate(&input);
+        assert!((pain.emotion_multiplier - 0.78).abs() < 0.001);
+
+        assert!(flow.wvi_score > pain.wvi_score);
+    }
+
+    #[test]
+    fn unknown_emotion_uses_neutral_multiplier() {
+        let mut input = default_input();
+        input.emotion_name = "xyzzy_not_real".to_string();
+        let result = WviV2Calculator::calculate(&input);
+        assert!((result.emotion_multiplier - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn progressive_score_above_60_is_boosted() {
+        let input = WviV2Input {
+            hrv_rmssd: 75.0,
+            stress_index: 25.0,
+            sleep_score: 80.0,
+            emotion_score: 80.0,
+            spo2: 98.0,
+            heart_rate: 65.0,
+            ..default_input()
+        };
+        let result = WviV2Calculator::calculate(&input);
+        if result.geometric_mean > 60.0 {
+            assert!(result.progressive_score >= result.geometric_mean - 0.1);
+        }
+    }
+}

@@ -272,3 +272,95 @@ impl EmotionEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn baseline_args() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+        // heart_rate, resting_hr, hrv, stress, spo2, temperature, base_temp,
+        // systolic_bp, ppi_coherence, ppi_rmssd, sleep_score, activity_score, hrv_trend
+        (72.0, 65.0, 55.0, 35.0, 98.0, 36.6, 36.6, 118.0, 0.65, 45.0, 78.0, 50.0, 0.0)
+    }
+
+    #[test]
+    fn detect_always_returns_primary_emotion() {
+        let (hr, rhr, hrv, stress, spo2, temp, btemp, bp, coh, pp, sl, act, tr) = baseline_args();
+        let result = EmotionEngine::detect(
+            hr, rhr, hrv, stress, spo2, temp, btemp, bp, coh, pp, sl, act, tr, None, 0.0,
+        );
+        // Must pick some primary emotion and assign non-negative confidence
+        assert!(result.primary_confidence >= 0.0);
+        assert!(result.primary_confidence <= 1.0);
+        assert_eq!(result.all_scores.len(), 18, "All 18 candidates must be in all_scores");
+    }
+
+    #[test]
+    fn detect_high_stress_leans_negative() {
+        // High stress, high HR, low HRV → should lean angry/anxious/stressed
+        let result = EmotionEngine::detect(
+            105.0, 65.0, 18.0, 85.0, 97.0, 36.6, 36.6, 135.0, 0.25, 20.0, 40.0, 60.0, -1.0, None, 0.0,
+        );
+        let negative = [
+            EmotionState::Angry, EmotionState::Anxious, EmotionState::Stressed,
+            EmotionState::Frustrated, EmotionState::Fearful,
+        ];
+        assert!(
+            negative.contains(&result.primary),
+            "High stress should pick a negative emotion, got {:?}", result.primary
+        );
+    }
+
+    #[test]
+    fn detect_high_hrv_low_stress_leans_positive() {
+        // Recovery-state: high HRV, low stress, normal HR, good sleep
+        let result = EmotionEngine::detect(
+            65.0, 62.0, 88.0, 20.0, 98.0, 36.6, 36.6, 115.0, 0.75, 60.0, 85.0, 30.0, 1.0, None, 0.0,
+        );
+        let positive = [
+            EmotionState::Calm, EmotionState::Relaxed, EmotionState::Recovering,
+            EmotionState::Meditative, EmotionState::Focused,
+        ];
+        assert!(
+            positive.contains(&result.primary),
+            "Recovery state should pick a positive emotion, got {:?}", result.primary
+        );
+    }
+
+    #[test]
+    fn detect_returns_timestamp() {
+        let (hr, rhr, hrv, stress, spo2, temp, btemp, bp, coh, pp, sl, act, tr) = baseline_args();
+        let result = EmotionEngine::detect(
+            hr, rhr, hrv, stress, spo2, temp, btemp, bp, coh, pp, sl, act, tr, None, 0.0,
+        );
+        // Timestamp must be recent (< 1 minute old)
+        let age = (Utc::now() - result.timestamp).num_seconds();
+        assert!(age >= 0 && age < 60);
+    }
+
+    #[test]
+    fn detect_returns_emoji_and_label() {
+        let (hr, rhr, hrv, stress, spo2, temp, btemp, bp, coh, pp, sl, act, tr) = baseline_args();
+        let result = EmotionEngine::detect(
+            hr, rhr, hrv, stress, spo2, temp, btemp, bp, coh, pp, sl, act, tr, None, 0.0,
+        );
+        assert!(!result.emoji.is_empty());
+        assert!(!result.label.is_empty());
+        assert!(!result.category.is_empty());
+    }
+
+    #[test]
+    fn detect_is_deterministic_for_same_inputs() {
+        let args = baseline_args();
+        let r1 = EmotionEngine::detect(
+            args.0, args.1, args.2, args.3, args.4, args.5, args.6, args.7, args.8, args.9,
+            args.10, args.11, args.12, None, 0.0,
+        );
+        let r2 = EmotionEngine::detect(
+            args.0, args.1, args.2, args.3, args.4, args.5, args.6, args.7, args.8, args.9,
+            args.10, args.11, args.12, None, 0.0,
+        );
+        // Same inputs must pick same primary emotion
+        assert_eq!(r1.primary, r2.primary);
+    }
+}
