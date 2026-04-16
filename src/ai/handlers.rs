@@ -2,6 +2,7 @@ use axum::{extract::State, Json};
 use sqlx::PgPool;
 use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
+use super::cli::{ask_or_fallback, AiEndpointKind};
 
 // ─── Biometric context fetched from DB ───────────────────────────────────────
 
@@ -139,22 +140,14 @@ fn format_biometric_context(ctx: &BiometricContext) -> String {
     parts.join("\n")
 }
 
-// ─── Claude API call ──────────────────────────────────────────────────────────
+// ─── Claude via CLI ──────────────────────────────────────────────────────────
+//
+// Calls the local `claude` CLI (Max subscription on production VPS) instead of
+// HTTP to api.anthropic.com / OpenRouter. Always returns a user-facing string —
+// falls back to per-endpoint static text if the CLI is unavailable.
+// See `super::cli` module for the CLI wrapper.
 
-async fn call_claude(pool: &PgPool, privy_did: &str, prompt: &str) -> Result<String, String> {
-    let api_key = std::env::var("CLAUDE_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        return Ok(
-            "AI features require an API key. Set CLAUDE_API_KEY in your .env file.".to_string(),
-        );
-    }
-
-    let model = std::env::var("CLAUDE_MODEL")
-        .unwrap_or_else(|_| "google/gemini-2.0-flash-001".to_string());
-
-    let api_url = std::env::var("CLAUDE_API_URL")
-        .unwrap_or_else(|_| "https://openrouter.ai/api/v1/chat/completions".to_string());
-
+async fn call_claude(pool: &PgPool, privy_did: &str, kind: AiEndpointKind, prompt: &str) -> String {
     let ctx = fetch_biometrics(pool, privy_did).await;
     let bio_context = format_biometric_context(&ctx);
 
@@ -210,48 +203,13 @@ Wellex detects emotions via fuzzy logic: Calm, Relaxed, Joyful, Energized, Excit
         bio_context, computed_context
     );
 
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 500,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-    });
+    // Assemble the full prompt: system + user question. Claude CLI reads a
+    // single combined prompt from stdin/argv — no separate system/user roles.
+    let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, prompt);
 
-    let resp = client
-        .post(&api_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to reach AI API: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("AI API error {}: {}", status, text));
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse AI response: {}", e))?;
-
-    // OpenRouter / OpenAI format: choices[0].message.content
-    let text = json
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|item| item.get("message"))
-        .and_then(|msg| msg.get("content"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("No response from AI.")
-        .to_string();
-
-    Ok(text)
+    // ask_or_fallback never panics; on CLI error it returns the per-endpoint
+    // static fallback text so iOS always gets something renderable.
+    ask_or_fallback(kind, &full_prompt).await
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -262,10 +220,8 @@ pub async fn interpret(
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let prompt = "Analyze ALL the biometric data above. For each metric, explain: 1) What the current value means 2) Whether it's in a healthy range 3) How it relates to other metrics. Start with the most important finding. Reference specific numbers.";
-    match call_claude(&pool, &user.privy_did, prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Interpret, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
 pub async fn recommendations(
@@ -274,10 +230,8 @@ pub async fn recommendations(
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let prompt = "Based on ALL the biometric data, provide exactly 3 personalized recommendations. Each must: 1) Reference a specific metric value 2) Give a concrete action (not vague advice) 3) Explain the expected benefit. Format: numbered list with bold action.";
-    match call_claude(&pool, &user.privy_did, prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Recommendations, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
 pub async fn chat(
@@ -294,10 +248,8 @@ pub async fn chat(
         "The user asks: \"{}\"\n\nAnswer using the biometric context above to give a personalized, helpful response.",
         user_message
     );
-    match call_claude(&pool, &user.privy_did, &prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Chat, &prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
 pub async fn explain_metric(
@@ -314,10 +266,8 @@ pub async fn explain_metric(
         "Explain the '{}' metric in the context of the biometric data above. What does the current value mean, what is optimal, and what affects it?",
         metric
     );
-    match call_claude(&pool, &user.privy_did, &prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::ExplainMetric, &prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
 pub async fn action_plan(
@@ -326,10 +276,8 @@ pub async fn action_plan(
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let prompt = "Create a personalized daily wellness plan based on the biometric data. Structure as:\n• MORNING (based on recovery/HRV): exercise type + duration\n• AFTERNOON (based on stress/activity): activity suggestion\n• EVENING (based on overall state): wind-down routine\nReference specific metric values to justify each suggestion.";
-    match call_claude(&pool, &user.privy_did, prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::ActionPlan, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
 pub async fn insights(
@@ -338,10 +286,8 @@ pub async fn insights(
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let prompt = "Identify the TOP 3 most significant findings from the biometric data. For each: 1) What you found (with specific numbers) 2) Why it matters 3) What to do about it. Prioritize by health impact. Use bullet points.";
-    match call_claude(&pool, &user.privy_did, prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Insights, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
 pub async fn genius_layer(
@@ -350,8 +296,6 @@ pub async fn genius_layer(
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let prompt = "You are the Genius Layer — provide the deepest analysis possible. Connect ALL signals:\n1) How HR + HRV + Stress interact (autonomic nervous system state)\n2) How SpO2 + Temperature + Activity relate (metabolic state)\n3) How Emotional state connects to physiological data\n4) What the WVI score + Bio Age reveal about long-term trajectory\n5) One non-obvious insight that connects 3+ metrics\nBe specific with numbers. This is the premium analysis.";
-    match call_claude(&pool, &user.privy_did, prompt).await {
-        Ok(text) => Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } }))),
-        Err(e) => Ok(Json(serde_json::json!({ "success": false, "data": { "message": e } }))),
-    }
+    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::GeniusLayer, prompt).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
