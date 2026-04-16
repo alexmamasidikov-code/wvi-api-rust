@@ -363,4 +363,53 @@ mod tests {
         // Same inputs must pick same primary emotion
         assert_eq!(r1.primary, r2.primary);
     }
+
+    // ---- Fail-safe / edge-case tests ----
+
+    #[test]
+    fn detect_all_zeros_does_not_panic_or_return_nan() {
+        let r = EmotionEngine::detect(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None, 0.0,
+        );
+        assert!(r.primary_confidence.is_finite());
+        assert!(r.secondary_confidence.is_finite());
+        assert!(r.primary_confidence >= 0.0 && r.primary_confidence <= 1.0);
+        for c in &r.all_scores {
+            assert!(c.score.is_finite(), "{:?} score not finite", c.emotion);
+            assert!(c.weight.is_finite(), "{:?} weight not finite", c.emotion);
+        }
+    }
+
+    #[test]
+    fn detect_negative_inputs_does_not_panic() {
+        let r = EmotionEngine::detect(
+            -50.0, -65.0, -10.0, -100.0, -5.0, -36.6, -36.6, -10.0, -5.0, -20.0,
+            -40.0, -30.0, -2.0, None, 0.0,
+        );
+        assert!(r.primary_confidence.is_finite());
+        assert!(!r.emoji.is_empty());
+    }
+
+    #[test]
+    fn detect_absurd_inputs_produce_finite_scores() {
+        let r = EmotionEngine::detect(
+            300.0, 300.0, 500.0, 1000.0, 200.0, 100.0, 36.6, 500.0, 10.0, 500.0,
+            200.0, 500.0, 100.0, None, 0.0,
+        );
+        assert!(r.primary_confidence.is_finite());
+        for c in &r.all_scores {
+            assert!(c.score.is_finite());
+        }
+    }
+
+    #[test]
+    fn all_18_emotions_present_in_candidates() {
+        let r = EmotionEngine::detect(
+            72.0, 65.0, 55.0, 35.0, 98.0, 36.6, 36.6, 118.0, 0.65, 45.0, 78.0, 50.0, 0.0, None, 0.0,
+        );
+        assert_eq!(r.all_scores.len(), 18, "must have all 18 emotions");
+        let emotions: std::collections::HashSet<_> =
+            r.all_scores.iter().map(|c| c.emotion).collect();
+        assert_eq!(emotions.len(), 18, "all emotions must be unique");
+    }
 }

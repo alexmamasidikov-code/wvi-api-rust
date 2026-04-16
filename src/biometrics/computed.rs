@@ -65,9 +65,158 @@ pub fn compute_bio_age(chronological_age: f64, hr: f64, hrv: f64, spo2: f64, ste
 /// Compute training load from recent activity
 /// TRIMP-based: duration × HR intensity
 pub fn compute_training_load(active_minutes: f64, avg_hr: f64, hr_max: f64) -> f64 {
+    // Defensive: guard against zero / negative hr_max which would produce NaN / Inf
+    let hr_max_safe = if hr_max > 0.0 { hr_max } else { 180.0 };
+    let active_safe = active_minutes.max(0.0);
+    let avg_hr_safe = avg_hr.max(0.0);
+
     // Cap active minutes to realistic daily max (don't use cumulative)
-    let daily_active = active_minutes.min(120.0); // max 2 hours per day
-    let intensity = (avg_hr / hr_max).clamp(0.0, 1.0);
+    let daily_active = active_safe.min(120.0); // max 2 hours per day
+    let intensity = (avg_hr_safe / hr_max_safe).clamp(0.0, 1.0);
     let trimp = daily_active * intensity * intensity;
     trimp.clamp(0.0, 200.0).round() // max 200 TRIMP per day
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Blood Pressure ----
+    #[test]
+    fn bp_normal_hrv_gives_normal_sys() {
+        let (sys, dia) = estimate_blood_pressure(70.0, 55.0);
+        assert!(sys >= 115.0 && sys <= 125.0, "expected ~120 sys, got {}", sys);
+        assert!(dia >= 70.0 && dia <= 80.0, "expected ~75 dia, got {}", dia);
+    }
+
+    #[test]
+    fn bp_high_hr_low_hrv_gives_elevated_bp() {
+        let (sys, _) = estimate_blood_pressure(100.0, 20.0);
+        assert!(sys > 130.0, "elevated HR+low HRV should give sys > 130, got {}", sys);
+    }
+
+    #[test]
+    fn bp_clamped_at_boundaries() {
+        let (sys_hi, dia_hi) = estimate_blood_pressure(200.0, 0.0);
+        let (sys_lo, dia_lo) = estimate_blood_pressure(40.0, 150.0);
+        assert!(sys_hi <= 180.0 && sys_lo >= 90.0);
+        assert!(dia_hi <= 120.0 && dia_lo >= 60.0);
+    }
+
+    #[test]
+    fn bp_zero_inputs_dont_produce_nan() {
+        let (sys, dia) = estimate_blood_pressure(0.0, 0.0);
+        assert!(sys.is_finite() && dia.is_finite());
+        assert!(sys >= 90.0 && sys <= 180.0);
+    }
+
+    // ---- VO2 Max ----
+    #[test]
+    fn vo2_young_fit_gives_high_score() {
+        let vo2 = estimate_vo2_max(55.0, 25.0);
+        assert!(vo2 >= 50.0, "young athlete should have VO2 > 50, got {}", vo2);
+    }
+
+    #[test]
+    fn vo2_older_average_gives_moderate_score() {
+        let vo2 = estimate_vo2_max(75.0, 55.0);
+        assert!(vo2 >= 25.0 && vo2 <= 40.0, "older moderate should be 25-40, got {}", vo2);
+    }
+
+    #[test]
+    fn vo2_clamped_to_15_75_range() {
+        let vo2_extreme_low = estimate_vo2_max(200.0, 100.0);
+        let vo2_extreme_high = estimate_vo2_max(30.0, 10.0);
+        assert!(vo2_extreme_low >= 15.0);
+        assert!(vo2_extreme_high <= 75.0);
+    }
+
+    // ---- Coherence ----
+    #[test]
+    fn coherence_scales_with_hrv() {
+        assert!(compute_coherence(100.0) > compute_coherence(50.0));
+        assert!(compute_coherence(50.0) > compute_coherence(10.0));
+    }
+
+    #[test]
+    fn coherence_clamped_0_100() {
+        assert_eq!(compute_coherence(0.0), 0.0);
+        let high = compute_coherence(500.0);
+        assert!(high <= 100.0);
+    }
+
+    // ---- Sleep Score ----
+    #[test]
+    fn sleep_score_ideal_phases_gives_high() {
+        let score = compute_sleep_score(20.0, 22.0, 8.0, 3.0);
+        assert!(score >= 95.0, "ideal sleep should be ~100, got {}", score);
+    }
+
+    #[test]
+    fn sleep_score_poor_gives_low() {
+        let score = compute_sleep_score(5.0, 5.0, 4.0, 25.0);
+        assert!(score <= 60.0, "poor sleep should be <=60, got {}", score);
+    }
+
+    #[test]
+    fn sleep_score_all_zeros_doesnt_panic() {
+        let score = compute_sleep_score(0.0, 0.0, 0.0, 0.0);
+        assert!(score.is_finite());
+        assert!(score >= 0.0 && score <= 100.0);
+    }
+
+    // ---- Bio Age ----
+    #[test]
+    fn bio_age_young_healthy_is_lower_than_chronological() {
+        let bio = compute_bio_age(35.0, 60.0, 75.0, 98.0, 12000.0, 85.0);
+        assert!(bio < 35.0, "healthy biometrics should reduce bio age, got {}", bio);
+    }
+
+    #[test]
+    fn bio_age_unhealthy_is_higher_than_chronological() {
+        let bio = compute_bio_age(35.0, 90.0, 20.0, 93.0, 1000.0, 35.0);
+        assert!(bio > 35.0, "unhealthy biometrics should increase bio age, got {}", bio);
+    }
+
+    #[test]
+    fn bio_age_zero_inputs_doesnt_panic() {
+        let bio = compute_bio_age(40.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(bio.is_finite());
+    }
+
+    // ---- Training Load ----
+    #[test]
+    fn training_load_capped_at_200() {
+        let load = compute_training_load(500.0, 180.0, 25.0);
+        assert!(load <= 200.0);
+    }
+
+    #[test]
+    fn training_load_active_minutes_capped_at_120() {
+        let load_high = compute_training_load(500.0, 150.0, 180.0);
+        let load_ceiling = compute_training_load(120.0, 150.0, 180.0);
+        // Going from 120→500 active minutes shouldn't change load (already capped)
+        assert_eq!(load_high, load_ceiling);
+    }
+
+    #[test]
+    fn training_load_zero_inputs_yields_zero() {
+        let load = compute_training_load(0.0, 0.0, 180.0);
+        assert_eq!(load, 0.0);
+    }
+
+    #[test]
+    fn training_load_zero_hr_max_doesnt_panic() {
+        // Fail-safe: avg_hr / 0 would produce inf; defensive code handles it
+        let load = compute_training_load(60.0, 150.0, 0.0);
+        assert!(load.is_finite());
+        assert!(load >= 0.0 && load <= 200.0);
+    }
+
+    #[test]
+    fn training_load_negative_inputs_dont_panic() {
+        let load = compute_training_load(-50.0, -200.0, -10.0);
+        assert!(load.is_finite());
+        assert!(load >= 0.0 && load <= 200.0);
+    }
 }
