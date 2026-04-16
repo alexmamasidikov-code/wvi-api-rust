@@ -22,6 +22,7 @@ mod health;
 mod social;
 mod audit;
 mod events;
+mod push;
 
 use cache::AppCache;
 use metrics::Metrics;
@@ -87,6 +88,11 @@ async fn main() {
     // for every user with recent biometric activity. Users tapping a card
     // get instant responses instead of waiting 20-40 s for the CLI.
     ai::precompute::spawn_prewarmer(pool.clone(), app_cache.clone());
+
+    // APNs client + push scheduler. No-op if APNS_* env vars are missing
+    // (client logs a one-time warning and all send() calls return Ok).
+    let apns = push::apns::ApnsClient::new();
+    push::scheduler::spawn_scheduler(pool.clone(), app_cache.clone(), apns.clone());
 
     // Metrics collector
     let app_metrics = Metrics::new();
@@ -287,6 +293,9 @@ async fn main() {
         // ═══ SETTINGS (4) ═══
         .route("/api/v1/settings", get(settings::handlers::get_settings).put(settings::handlers::update_settings))
         .route("/api/v1/settings/notifications", get(settings::handlers::get_notifications).put(settings::handlers::update_notifications))
+
+        // ═══ PUSH (APNs) ═══
+        .route("/api/v1/notifications/register", post(push::handlers::register_token))
 
         // ═══ AUDIT (1) ═══
         .route("/api/v1/audit/log", get(audit::get_audit_log))
