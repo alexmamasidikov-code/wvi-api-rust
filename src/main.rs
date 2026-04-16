@@ -37,6 +37,8 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use axum::middleware::{self as axum_middleware, Next};
 use axum::response::Response;
 use axum::http::{Request, StatusCode};
@@ -310,23 +312,20 @@ async fn security_headers(
     response
 }
 
-// ─── Rate limiter (100 req/sec global, sliding window) ───────────────────────
+// ─── Per-user rate limiter (60 req/min per user, 20 req/min unauthenticated) ─
 
 #[derive(Clone)]
 struct RateLimiterState {
-    count: Arc<AtomicU64>,
-    window_start: Arc<AtomicU64>,
+    /// Per-key buckets: key → (window_start_sec, request_count)
+    buckets: Arc<Mutex<HashMap<String, (u64, u64)>>>,
+    /// Global request counter for metrics
+    global_count: Arc<AtomicU64>,
 }
 
 fn rate_limiter_state() -> RateLimiterState {
     RateLimiterState {
-        count: Arc::new(AtomicU64::new(0)),
-        window_start: Arc::new(AtomicU64::new(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )),
+        buckets: Arc::new(Mutex::new(HashMap::new())),
+        global_count: Arc::new(AtomicU64::new(0)),
     }
 }
 
@@ -339,20 +338,49 @@ async fn rate_limit_middleware(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    let window_secs = 60; // 1 minute window
 
-    // Increment total request counter
+    // Increment global request counter for metrics
     if let Some(m) = req.extensions().get::<Metrics>() {
         m.requests_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    let window = state.window_start.load(Ordering::Relaxed);
-    if now > window {
-        state.window_start.store(now, Ordering::Relaxed);
-        state.count.store(1, Ordering::Relaxed);
-    } else {
-        let prev = state.count.fetch_add(1, Ordering::Relaxed);
-        if prev >= 100 {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
+    // Extract user identity: prefer user_id from auth, fallback to IP
+    let user_key = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            req.headers()
+                .get("x-forwarded-for")
+                .or_else(|| req.headers().get("x-real-ip"))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("anonymous")
+                .to_string()
+        });
+
+    let is_authenticated = req.headers().get("Authorization").is_some();
+    let limit: u64 = if is_authenticated { 60 } else { 20 };
+
+    // Check and update per-user bucket
+    {
+        let mut buckets = state.buckets.lock().unwrap();
+        let entry = buckets.entry(user_key).or_insert((now, 0));
+        if now - entry.0 >= window_secs {
+            // New window
+            *entry = (now, 1);
+        } else {
+            entry.1 += 1;
+            if entry.1 > limit {
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+        }
+
+        // Periodic cleanup: remove stale entries (every ~100 requests)
+        state.global_count.fetch_add(1, Ordering::Relaxed);
+        if state.global_count.load(Ordering::Relaxed) % 100 == 0 {
+            buckets.retain(|_, (ts, _)| now - *ts < window_secs * 2);
         }
     }
 
