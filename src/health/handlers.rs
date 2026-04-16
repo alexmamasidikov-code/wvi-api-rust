@@ -30,3 +30,16 @@ pub async fn docs_json() -> AppResult<Json<serde_json::Value>> {
         "info": { "title": "WVI API", "version": "1.0.0" }
     })))
 }
+
+pub async fn readiness(State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let db_ok = sqlx::query("SELECT 1").execute(&pool).await.is_ok();
+    if db_ok {
+        Ok(Json(serde_json::json!({"status": "ready"})))
+    } else {
+        Err(crate::error::AppError::Internal("Database not ready".into()))
+    }
+}
+
+pub async fn liveness() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "alive"}))
+}

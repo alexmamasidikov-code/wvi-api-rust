@@ -30,17 +30,21 @@ use axum::{
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use axum::middleware::{self as axum_middleware, Next};
+use axum::response::Response;
+use axum::http::{Request, StatusCode};
 
 use auth::privy::PrivyClient;
 
 #[tokio::main]
 async fn main() {
-    // Init tracing
+    // Init tracing — structured JSON logging
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "wvi_api=debug,tower_http=debug".into()))
-        .with(tracing_subscriber::fmt::layer())
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(fmt::layer().json())
         .init();
 
     dotenvy::dotenv().ok();
@@ -241,20 +245,24 @@ async fn main() {
         .route("/api/v1/social/challenges", get(social::handlers::get_challenges))
         .route("/api/v1/social/leaderboard", get(social::handlers::get_leaderboard))
 
-        // ═══ HEALTH (3 — PUBLIC) ═══
+        // ═══ HEALTH (5 — PUBLIC) ═══
         .route("/api/v1/health/server-status", get(health::handlers::server_status))
         .route("/api/v1/health/api-version", get(health::handlers::api_version))
+        .route("/api/v1/health/ready", get(health::handlers::readiness))
+        .route("/api/v1/health/live", get(health::handlers::liveness))
         .route("/api/v1/docs.json", get(health::handlers::docs_json))
 
         .layer(Extension(app_cache))
         .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .layer(axum_middleware::from_fn(rate_limit_middleware))
+        .layer(Extension(rate_limiter_state()))
         .with_state(pool);
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!("WVI API starting on {addr}");
-    tracing::info!("119 endpoints registered across 18 modules");
+    tracing::info!("121 endpoints registered across 18 modules");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app)
@@ -266,4 +274,48 @@ async fn main() {
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
     tracing::info!("Shutdown signal received");
+}
+
+// ─── Rate limiter (100 req/sec global, sliding window) ───────────────────────
+
+#[derive(Clone)]
+struct RateLimiterState {
+    count: Arc<AtomicU64>,
+    window_start: Arc<AtomicU64>,
+}
+
+fn rate_limiter_state() -> RateLimiterState {
+    RateLimiterState {
+        count: Arc::new(AtomicU64::new(0)),
+        window_start: Arc::new(AtomicU64::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )),
+    }
+}
+
+async fn rate_limit_middleware(
+    Extension(state): Extension<RateLimiterState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let window = state.window_start.load(Ordering::Relaxed);
+    if now > window {
+        state.window_start.store(now, Ordering::Relaxed);
+        state.count.store(1, Ordering::Relaxed);
+    } else {
+        let prev = state.count.fetch_add(1, Ordering::Relaxed);
+        if prev >= 100 {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
+    Ok(next.run(req).await)
 }
