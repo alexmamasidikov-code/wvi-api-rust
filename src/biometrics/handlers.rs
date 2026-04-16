@@ -317,14 +317,35 @@ pub async fn get_recovery(user: AuthUser, State(pool): State<PgPool>) -> AppResu
     let hrv_ratio = if baseline_hrv > 0.0 { morning_hrv / baseline_hrv } else { 1.0 };
 
     // Recovery formula:
-    // - HRV vs baseline: 60% weight (ratio > 1.0 = better than usual)
-    // - Sleep quality: 30% weight
+    // - HRV vs baseline: 40% weight
+    // - Sleep quality: 40% weight (equal to HRV — sleep is critical for recovery)
     // - Absolute HRV quality: 10% weight
-    let hrv_component = (hrv_ratio * 100.0).clamp(0.0, 130.0) * 0.6;  // Can exceed 100% if better than baseline
-    let sleep_component = sleep_score * 0.3;
+    // - Resting HR bonus: 10% weight
+    let hrv_component = (hrv_ratio * 100.0).clamp(0.0, 120.0) * 0.4;
+    let sleep_component = sleep_score * 0.4;
     let abs_component = (morning_hrv / 100.0 * 100.0).clamp(0.0, 100.0) * 0.1;
 
-    let recovery = (hrv_component + sleep_component + abs_component).clamp(0.0, 100.0).round();
+    // Resting HR component: lower = better recovery
+    let resting_hr = sqlx::query_scalar::<_, f32>(
+        "SELECT bpm FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
+    ).bind(uid).fetch_optional(&pool).await?.unwrap_or(70.0) as f64;
+    let hr_component = if resting_hr < 60.0 { 100.0 }
+        else if resting_hr < 70.0 { 80.0 }
+        else if resting_hr < 80.0 { 60.0 }
+        else { 40.0 };
+    let hr_weighted = hr_component * 0.1;
+
+    let mut recovery = (hrv_component + sleep_component + abs_component + hr_weighted).clamp(0.0, 100.0);
+
+    // SLEEP CAP: poor sleep = limited recovery regardless of HRV
+    if sleep_score > 0.0 && sleep_score < 50.0 {
+        recovery = recovery.min(65.0); // Can't be fully recovered with poor sleep
+    }
+    if sleep_score > 0.0 && sleep_score < 30.0 {
+        recovery = recovery.min(45.0); // Very poor sleep = max 45% recovery
+    }
+
+    let recovery = recovery.round();
 
     let level = if recovery >= 80.0 { "excellent" }
         else if recovery >= 60.0 { "good" }
