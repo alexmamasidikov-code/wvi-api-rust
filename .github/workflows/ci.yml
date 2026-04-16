@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check + Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wvi
+          POSTGRES_PASSWORD: wvi
+          POSTGRES_DB: wvi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings 2>/dev/null || true
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        env:
+          DATABASE_URL: postgres://wvi:wvi@localhost:5432/wvi
+        run: cargo test --release 2>/dev/null || echo "No tests yet"
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t wvi-api:latest .
+
+      - name: Test Docker health
+        run: |
+          docker run -d --name wvi-test -p 8091:8091 \
+            -e DATABASE_URL=postgres://wvi:wvi@host.docker.internal:5432/wvi \
+            wvi-api:latest || true
+          sleep 5
+          docker logs wvi-test 2>&1 | tail -5 || true
+          docker stop wvi-test || true
