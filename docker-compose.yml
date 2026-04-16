@@ -1,3 +1,6 @@
+# WARNING: Default credentials below are for local development only.
+# Replace POSTGRES_PASSWORD, GF_SECURITY_ADMIN_PASSWORD, and DATABASE_URL
+# with strong secrets before deploying to production.
 version: '3.8'
 
 services:

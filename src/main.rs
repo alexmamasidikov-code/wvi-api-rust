@@ -30,6 +30,8 @@ use axum::{
     Extension, Router,
 };
 use sqlx::postgres::PgPoolOptions;
+use axum::extract::DefaultBodyLimit;
+use axum::http::HeaderValue;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -107,7 +109,10 @@ async fn main() {
     }
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin([
+            "https://6ssssdj5s38h.share.zrok.io".parse::<HeaderValue>().unwrap(),
+            "http://localhost:3000".parse::<HeaderValue>().unwrap(),
+        ])
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -267,7 +272,9 @@ async fn main() {
         .layer(Extension(app_metrics))
         .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
+        .layer(axum_middleware::from_fn(security_headers))
         .layer(cors)
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
         .layer(axum_middleware::from_fn(rate_limit_middleware))
         .layer(Extension(rate_limiter_state()))
         .with_state(pool);
@@ -286,6 +293,21 @@ async fn main() {
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
     tracing::info!("Shutdown signal received");
+}
+
+// ─── Security headers middleware ─────────────────────────────────────────────
+
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("X-Frame-Options", "DENY".parse().unwrap());
+    headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
+    headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
+    response
 }
 
 // ─── Rate limiter (100 req/sec global, sliding window) ───────────────────────
