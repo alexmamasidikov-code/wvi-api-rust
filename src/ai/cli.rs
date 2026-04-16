@@ -26,9 +26,10 @@ use once_cell::sync::Lazy;
 static CLI_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(5));
 
 /// Upper-bound wall-clock time for a single CLI invocation. Typical
-/// response is 3-10 s; anything above 30 s is almost always stuck / network
-/// trouble.
-const CLI_TIMEOUT: Duration = Duration::from_secs(30);
+/// response is 20-40 s for the medical-analyst prompt (3-5 KB context).
+/// Bumped to 90 s so iOS clients don't see fallbacks for every queued call
+/// when several cards fire simultaneously.
+const CLI_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Default Claude model. Sonnet 4.6 is the production analysis target —
 /// fast enough for chat-style latency, cheaper than Opus, capable enough
