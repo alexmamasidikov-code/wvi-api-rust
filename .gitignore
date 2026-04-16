@@ -1,3 +1,4 @@
+*.pyc
+.env
 /target
 docs/qa/__pycache__/
-*.pyc
