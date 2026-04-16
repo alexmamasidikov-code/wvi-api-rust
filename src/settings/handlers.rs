@@ -22,6 +22,7 @@ pub async fn update_settings(user: AuthUser, State(pool): State<PgPool>, Json(bo
         .bind(body.get("timezone").and_then(|v| v.as_str()))
         .bind(body.get("theme").and_then(|v| v.as_str()))
         .execute(&pool).await?;
+    crate::audit::log_action(&pool, &user.privy_did, "settings.update", "settings", None, Some(body.clone()), None, None).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": "Settings updated" } })))
 }
 
@@ -43,5 +44,6 @@ pub async fn update_notifications(user: AuthUser, State(pool): State<PgPool>, Js
         .bind(body.get("email").and_then(|v| v.as_bool()))
         .bind(body.get("sms").and_then(|v| v.as_bool()))
         .execute(&pool).await?;
+    crate::audit::log_action(&pool, &user.privy_did, "settings.update_notifications", "notification_settings", None, Some(body.clone()), None, None).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": "Notifications updated" } })))
 }

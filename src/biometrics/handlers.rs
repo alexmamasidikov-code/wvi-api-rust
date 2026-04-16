@@ -868,6 +868,12 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<S
         );
     }
 
+    crate::audit::log_action(
+        &pool, &user.privy_did, "biometrics.sync", "biometrics", None,
+        Some(serde_json::json!({ "recordsReceived": received, "recordsProcessed": processed })),
+        None, None,
+    ).await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "data": { "syncId": uuid::Uuid::new_v4(), "recordsReceived": received, "recordsProcessed": processed, "deviceId": body.device_id }

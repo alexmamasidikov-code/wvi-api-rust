@@ -20,6 +20,7 @@ mod export;
 mod settings;
 mod health;
 mod social;
+mod audit;
 
 use cache::AppCache;
 use metrics::Metrics;
@@ -250,6 +251,9 @@ async fn main() {
         // ═══ SETTINGS (4) ═══
         .route("/api/v1/settings", get(settings::handlers::get_settings).put(settings::handlers::update_settings))
         .route("/api/v1/settings/notifications", get(settings::handlers::get_notifications).put(settings::handlers::update_notifications))
+
+        // ═══ AUDIT (1) ═══
+        .route("/api/v1/audit/log", get(audit::get_audit_log))
 
         // ═══ SOCIAL (4) ═══
         .route("/api/v1/social/feed", get(social::handlers::get_feed))

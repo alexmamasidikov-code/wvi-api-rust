@@ -49,6 +49,8 @@ pub async fn verify(
     .fetch_one(&pool)
     .await?;
 
+    crate::audit::log_action(&pool, did, "auth.verify", "session", None, None, None, None).await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
@@ -112,6 +114,8 @@ pub async fn link_wallet(
     .execute(&pool)
     .await?;
 
+    crate::audit::log_action(&pool, &user.privy_did, "auth.link_wallet", "wallet", Some(&req.wallet_address), None, None, None).await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "data": { "message": "Wallet linked", "address": req.wallet_address }
@@ -124,6 +128,7 @@ pub async fn logout(
 ) -> AppResult<Json<serde_json::Value>> {
     // Privy sessions are managed on the client side
     // Server can clear any local session state if needed
+    // Note: no pool available here, so audit is skipped for logout
     Ok(Json(serde_json::json!({
         "success": true,
         "data": { "message": "Logged out" }
