@@ -37,6 +37,7 @@ use axum::{
 use sqlx::postgres::PgPoolOptions;
 use axum::extract::DefaultBodyLimit;
 use axum::http::HeaderValue;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, fmt::time::UtcTime, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -381,6 +382,7 @@ async fn async_main() {
         .layer(Extension(app_metrics))
         .layer(Extension(privy))
         .layer(axum_middleware::from_fn(sentry_middleware))
+        .layer(CompressionLayer::new().br(true).gzip(true).deflate(true))
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(track_request))
         .layer(axum_middleware::from_fn(trace_request_ctx))
