@@ -93,31 +93,48 @@ async fn upsert_cache(
     Ok(())
 }
 
-/// Morning/evening daily crons — parallels Project B's sensitivity narrator.
+/// Morning/evening daily crons, per-user-timezone. Ticks every 5 minutes,
+/// fires morning_forecast at 07:00 local and evening_journey at 21:00 local,
+/// guarded by `daily_brief_log` so we never double-fire.
 pub fn spawn_daily_crons(pool: PgPool) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(300));
         loop {
             tick.tick().await;
-            let hour = chrono::Utc::now().hour();
-            let is_morning = hour == 7;
-            let is_evening = hour == 21;
-            if !is_morning && !is_evening {
-                continue;
-            }
-            let users: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM users")
-                .fetch_all(&pool)
-                .await
-                .unwrap_or_default();
-            for (user_id,) in users {
-                if is_morning {
-                    let _ = morning_forecast(&pool, user_id).await;
-                } else if is_evening {
-                    let _ = evening_journey(&pool, user_id).await;
-                }
+            if let Err(e) = run_cycle(&pool).await {
+                tracing::error!(?e, "emotion narrator cycle failed");
             }
         }
     });
 }
 
-use chrono::Timelike;
+async fn run_cycle(pool: &PgPool) -> sqlx::Result<()> {
+    let users: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT u.id, COALESCE(s.timezone, 'UTC')
+         FROM users u
+         LEFT JOIN app_settings s ON s.user_id = u.id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (user_id, tz_str) in users {
+        let tz: chrono_tz::Tz = tz_str.parse().unwrap_or(chrono_tz::UTC);
+        let now_local = chrono::Utc::now().with_timezone(&tz);
+
+        if crate::narrator_schedule::should_fire_morning(&now_local)
+            && crate::narrator_schedule::record_fire(pool, user_id, "morning", &now_local)
+                .await
+                .unwrap_or(false)
+        {
+            let _ = morning_forecast(pool, user_id).await;
+        }
+        if crate::narrator_schedule::should_fire_evening(&now_local)
+            && crate::narrator_schedule::record_fire(pool, user_id, "evening", &now_local)
+                .await
+                .unwrap_or(false)
+        {
+            let _ = evening_journey(pool, user_id).await;
+        }
+    }
+    Ok(())
+}

@@ -23,11 +23,13 @@ pub async fn run(pool: PgPool, apns: ApnsClient) {
 }
 
 async fn run_cycle(pool: &PgPool, apns: &ApnsClient) -> anyhow::Result<()> {
-    // Users with master switch on + their timezone.
+    // Users with master switch on + their timezone. `timezone` lives in
+    // `app_settings`, not `users`, so LEFT JOIN and default to UTC.
     let users: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT u.id, COALESCE(u.timezone, 'UTC')
+        "SELECT u.id, COALESCE(s.timezone, 'UTC')
          FROM users u
          JOIN user_reminder_master m ON m.user_id = u.id
+         LEFT JOIN app_settings s ON s.user_id = u.id
          WHERE m.enabled = true",
     )
     .fetch_all(pool)

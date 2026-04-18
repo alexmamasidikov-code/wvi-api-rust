@@ -30,6 +30,7 @@ mod alarms;
 mod reminders;
 mod sensitivity;
 mod stress;
+mod narrator_schedule;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};

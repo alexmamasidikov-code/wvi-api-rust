@@ -193,20 +193,54 @@ async fn upsert_cache(
     Ok(())
 }
 
-/// Simple hourly cron — once an hour tick every user for morning/evening refresh.
-/// Per-user timezone scheduling is deferred to Project C (chrono-tz is in tree).
+/// Per-user TZ-aware scheduler. Ticks every 5 minutes and fires each user's
+/// morning brief at 07:00 and evening review at 21:00 local time, guarded by
+/// `daily_brief_log` so we never double-fire inside the same local day.
 pub fn spawn_daily_crons(pool: PgPool) {
     tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(300));
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-            let users: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM users")
-                .fetch_all(&pool)
-                .await
-                .unwrap_or_default();
-            for (user_id,) in users {
-                let _ = daily_morning_brief(&pool, user_id).await;
-                let _ = evening_pattern_review(&pool, user_id).await;
+            tick.tick().await;
+            if let Err(e) = run_user_schedule(&pool).await {
+                tracing::error!(?e, "sensitivity daily crons cycle failed");
             }
         }
     });
+}
+
+async fn run_user_schedule(pool: &PgPool) -> sqlx::Result<()> {
+    for (user_id, tz_str) in list_users_with_tz(pool).await? {
+        let tz: chrono_tz::Tz = tz_str.parse().unwrap_or(chrono_tz::UTC);
+        let now_local = Utc::now().with_timezone(&tz);
+
+        if crate::narrator_schedule::should_fire_morning(&now_local) {
+            if crate::narrator_schedule::record_fire(pool, user_id, "morning", &now_local)
+                .await
+                .unwrap_or(false)
+            {
+                let _ = daily_morning_brief(pool, user_id).await;
+            }
+        }
+        if crate::narrator_schedule::should_fire_evening(&now_local) {
+            if crate::narrator_schedule::record_fire(pool, user_id, "evening", &now_local)
+                .await
+                .unwrap_or(false)
+            {
+                let _ = evening_pattern_review(pool, user_id).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Users + timezone. `timezone` lives in `app_settings`, not `users`, so we
+/// LEFT JOIN and fall back to `UTC` for users without saved settings.
+async fn list_users_with_tz(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, String)>> {
+    sqlx::query_as(
+        "SELECT u.id, COALESCE(s.timezone, 'UTC')
+         FROM users u
+         LEFT JOIN app_settings s ON s.user_id = u.id",
+    )
+    .fetch_all(pool)
+    .await
 }
