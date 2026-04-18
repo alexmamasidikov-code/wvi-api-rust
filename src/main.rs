@@ -29,6 +29,7 @@ mod intraday;
 mod alarms;
 mod reminders;
 mod sensitivity;
+mod stress;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};
@@ -161,6 +162,12 @@ async fn async_main() {
     // Sensitivity — daily morning/evening AI narrators (Project B). Hourly
     // tick, per-user TZ deferred to Project C.
     sensitivity::narrator::spawn_daily_crons(pool.clone());
+
+    // Project C — emotion + stress inference workers + emotion daily crons.
+    emotions::v2::inference::spawn_worker(pool.clone());
+    emotions::v2::narrator::spawn_daily_crons(pool.clone());
+    stress::v2::inference::spawn_worker(pool.clone());
+    stress::v2::micro_pulse::spawn_worker(pool.clone());
 
     // Metrics collector + periodic DB pool sampler (updates gauges every 5 s).
     let app_metrics = Metrics::new();
@@ -394,6 +401,9 @@ async fn async_main() {
             "/api/v1/reminders/settings",
             get(reminders::handlers::get_settings).put(reminders::handlers::put_settings),
         )
+
+        // ═══ STRESS v2 (Project C — 1-min score + 5-level + micro-pulse) ═══
+        .route("/api/v1/stress/v2/intraday", get(stress::v2::handlers::get_intraday))
 
         // ═══ SENSITIVITY (Project B — signals + baselines + contextual AI) ═══
         .route("/api/v1/signals", get(sensitivity::handlers::get_signals))
