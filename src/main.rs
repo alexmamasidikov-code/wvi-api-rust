@@ -3,6 +3,7 @@ mod cache;
 mod config;
 mod error;
 mod metrics;
+mod validation;
 mod users;
 mod biometrics;
 mod wvi;

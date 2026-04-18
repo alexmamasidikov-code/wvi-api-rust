@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +115,83 @@ pub struct BiometricEntry {
     pub value: f64,
     #[serde(default)]
     pub extra: Option<serde_json::Value>,
+}
+
+// ─── Validated upload DTOs ───────────────────────────────────────────────────
+// Each metric gets its own typed entry so range checks live on the field itself.
+// Error messages match `"must be X-Y"` for the 422 fields map.
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct HeartRateEntry {
+    pub timestamp: DateTime<Utc>,
+    #[validate(range(min = 30.0, max = 220.0, message = "must be 30-220"))]
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct HeartRateUpload {
+    #[validate(nested)]
+    pub records: Vec<HeartRateEntry>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct SpO2Entry {
+    pub timestamp: DateTime<Utc>,
+    #[validate(range(min = 70.0, max = 100.0, message = "must be 70.0-100.0"))]
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct SpO2Upload {
+    #[validate(nested)]
+    pub records: Vec<SpO2Entry>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct TemperatureEntry {
+    pub timestamp: DateTime<Utc>,
+    #[validate(range(min = 32.0, max = 42.0, message = "must be 32.0-42.0"))]
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct TemperatureUpload {
+    #[validate(nested)]
+    pub records: Vec<TemperatureEntry>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct HRVEntry {
+    pub timestamp: DateTime<Utc>,
+    // Accept both `rmssd` (canonical) and `value` (simple upload payload).
+    #[serde(default, alias = "value")]
+    #[validate(range(min = 5.0, max = 200.0, message = "must be 5.0-200.0"))]
+    pub rmssd: Option<f64>,
+    pub stress: Option<f64>,
+    pub heart_rate: Option<f64>,
+    pub systolic_bp: Option<f64>,
+    pub diastolic_bp: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct HRVUpload {
+    #[validate(nested)]
+    pub records: Vec<HRVEntry>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityUpload {
+    pub timestamp: Option<DateTime<Utc>>,
+    #[validate(range(min = 0.0, max = 100000.0, message = "must be 0-100000"))]
+    pub steps: Option<f64>,
+    #[validate(range(min = 0.0, max = 50000.0, message = "must be 0.0-50000.0"))]
+    pub calories: Option<f64>,
+    pub distance: Option<f64>,
+    pub active_minutes: Option<f64>,
+    pub mets: Option<f64>,
+    pub activity_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

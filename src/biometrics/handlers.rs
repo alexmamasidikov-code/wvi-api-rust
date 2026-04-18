@@ -5,6 +5,7 @@ use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
 use crate::emotions::engine::EmotionEngine;
 use crate::events::{EventBus, BiometricEvent, TOPIC_BIOMETRICS};
+use crate::validation::ValidatedJson;
 use super::models::*;
 
 fn default_from() -> chrono::DateTime<Utc> {
@@ -38,7 +39,8 @@ pub async fn get_heart_rate(user: AuthUser, State(pool): State<PgPool>, Query(q)
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-pub async fn post_heart_rate(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
+#[tracing::instrument(name = "biometrics.post_heart_rate", skip_all, fields(user = %user.privy_did, records = body.records.len()))]
+pub async fn post_heart_rate(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(body): ValidatedJson<HeartRateUpload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let mut count = 0i64;
     for r in &body.records {
@@ -64,18 +66,14 @@ pub async fn get_hrv(user: AuthUser, State(pool): State<PgPool>, Query(q): Query
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
+pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(body): ValidatedJson<HRVUpload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
-    let records = body.get("records").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let mut count = 0i64;
     let mut rejected_placeholder = 0i64;
-    for r in &records {
-        // Accept both `rmssd` (canonical) and `value` (simple upload payload).
-        let rmssd_f = r.get("rmssd").and_then(|v| v.as_f64())
-            .or_else(|| r.get("value").and_then(|v| v.as_f64()));
+    for r in &body.records {
         // Reject known JCV8 firmware placeholders: 70.0 = "no data",
         // 39.0 / 26.0 = quantized rest/stress categories (not real HRV).
-        if let Some(v) = rmssd_f {
+        if let Some(v) = r.rmssd {
             if v == 70.0 || v == 39.0 || v == 26.0 {
                 rejected_placeholder += 1;
                 continue;
@@ -83,12 +81,12 @@ pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
         }
         sqlx::query("INSERT INTO hrv (user_id, timestamp, rmssd, stress, heart_rate, systolic_bp, diastolic_bp) VALUES ($1, $2, $3, $4, $5, $6, $7)")
             .bind(uid)
-            .bind(r.get("timestamp").and_then(|v| v.as_str()).and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok()).unwrap_or_else(Utc::now))
-            .bind(rmssd_f.map(|v| v as f32))
-            .bind(r.get("stress").and_then(|v| v.as_f64()).map(|v| v as f32))
-            .bind(r.get("heartRate").and_then(|v| v.as_f64()).map(|v| v as f32))
-            .bind(r.get("systolicBP").and_then(|v| v.as_f64()).map(|v| v as f32))
-            .bind(r.get("diastolicBP").and_then(|v| v.as_f64()).map(|v| v as f32))
+            .bind(r.timestamp)
+            .bind(r.rmssd.map(|v| v as f32))
+            .bind(r.stress.map(|v| v as f32))
+            .bind(r.heart_rate.map(|v| v as f32))
+            .bind(r.systolic_bp.map(|v| v as f32))
+            .bind(r.diastolic_bp.map(|v| v as f32))
             .execute(&pool).await?;
         count += 1;
     }
@@ -109,20 +107,15 @@ pub async fn get_spo2(user: AuthUser, State(pool): State<PgPool>, Query(q): Quer
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
+pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(body): ValidatedJson<SpO2Upload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let mut count = 0i64;
-    let mut rejected = 0i64;
     for r in &body.records {
-        // Clamp SpO2 to physiological range 70-100%. Bracelet sensor occasionally
-        // reports spurious >100% or <70% values (off-wrist / poor contact).
-        let clamped = r.value.clamp(70.0, 100.0);
-        if (clamped - r.value).abs() > 0.1 { rejected += 1; }
         sqlx::query("INSERT INTO spo2 (user_id, timestamp, value) VALUES ($1, $2, $3)")
-            .bind(uid).bind(r.timestamp).bind(clamped as f32).execute(&pool).await?;
+            .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
         count += 1;
     }
-    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "spuriousClamped": rejected, "type": "spo2" } })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "spo2" } })))
 }
 
 // ═══ TEMPERATURE ═══
@@ -139,18 +132,15 @@ pub async fn get_temperature(user: AuthUser, State(pool): State<PgPool>, Query(q
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-pub async fn post_temperature(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
+pub async fn post_temperature(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(body): ValidatedJson<TemperatureUpload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let mut count = 0i64;
-    let mut rejected = 0i64;
     for r in &body.records {
-        // Physiological wrist-skin range is 32-42°C. Reject off-wrist/poor-contact noise.
-        if !(32.0..=42.0).contains(&r.value) { rejected += 1; continue; }
         sqlx::query("INSERT INTO temperature (user_id, timestamp, value) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
         count += 1;
     }
-    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "rejected": rejected, "type": "temperature" } })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "temperature" } })))
 }
 
 // ═══ SLEEP ═══
@@ -236,16 +226,16 @@ pub async fn get_activity(user: AuthUser, State(pool): State<PgPool>, Query(q): 
     Ok(Json(serde_json::json!({ "success": true, "data": rows })))
 }
 
-pub async fn post_activity(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
+pub async fn post_activity(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(body): ValidatedJson<ActivityUpload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     sqlx::query("INSERT INTO activity (user_id, timestamp, steps, calories, distance, active_minutes, mets, activity_type) VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7)")
         .bind(uid)
-        .bind(body.get("steps").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("calories").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("distance").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("activeMinutes").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("mets").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("activityType").and_then(|v| v.as_str()))
+        .bind(body.steps.map(|v| v as f32))
+        .bind(body.calories.map(|v| v as f32))
+        .bind(body.distance.map(|v| v as f32))
+        .bind(body.active_minutes.map(|v| v as f32))
+        .bind(body.mets.map(|v| v as f32))
+        .bind(body.activity_type.as_deref())
         .execute(&pool).await?;
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": 1, "type": "activity" } })))
 }
