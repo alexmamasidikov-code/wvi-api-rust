@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// WVI 7-tier classification per Wellex master spec §2.
+/// Thresholds match Swift `WVIColor.wviColor`, `StatusLevel.from(score:)`,
+/// and the category labels in `docs/qa/test-vectors/wvi_vectors.json`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WVILevel {
@@ -8,20 +11,22 @@ pub enum WVILevel {
     Excellent,
     Good,
     Moderate,
-    Low,
-    Poor,
+    Attention,
+    Critical,
     Dangerous,
 }
 
 impl WVILevel {
     pub fn from_score(score: f64) -> Self {
+        // Master spec §2: 90+ Superb, 80-89 Excellent, 70-79 Good,
+        // 60-69 Moderate, 50-59 Attention, 40-49 Critical, <40 Dangerous.
         match score as u32 {
             90..=100 => Self::Superb,
             80..=89 => Self::Excellent,
-            65..=79 => Self::Good,
-            50..=64 => Self::Moderate,
-            35..=49 => Self::Low,
-            20..=34 => Self::Poor,
+            70..=79 => Self::Good,
+            60..=69 => Self::Moderate,
+            50..=59 => Self::Attention,
+            40..=49 => Self::Critical,
             _ => Self::Dangerous,
         }
     }
@@ -34,8 +39,8 @@ impl std::fmt::Display for WVILevel {
             Self::Excellent => "excellent",
             Self::Good => "good",
             Self::Moderate => "moderate",
-            Self::Low => "low",
-            Self::Poor => "poor",
+            Self::Attention => "attention",
+            Self::Critical => "critical",
             Self::Dangerous => "dangerous",
         };
         f.write_str(s)

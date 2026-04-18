@@ -21,16 +21,19 @@ impl MetricNormalizer {
         (100.0 - stress).clamp(0.0, 100.0)
     }
 
-    /// SpO2 Score: non-linear scale
+    /// SpO₂ Score: non-linear scale per master spec clinical tiers
+    /// (≥95 normal, 90-94 mild hypoxia, <90 significant hypoxia).
+    /// Input is clamped to 70-100 so sensor glitches don't emit zeros.
     pub fn spo2_score(spo2: f64) -> f64 {
-        if spo2 >= 98.0 {
-            80.0 + (spo2 - 98.0) * 10.0
-        } else if spo2 >= 95.0 {
-            30.0 + (spo2 - 95.0) * 16.67
-        } else if spo2 >= 90.0 {
-            (spo2 - 90.0) * 6.0
+        let s = spo2.clamp(70.0, 100.0);
+        if s >= 98.0 {
+            80.0 + (s - 98.0) * 10.0            // 98-100 → 80-100
+        } else if s >= 95.0 {
+            50.0 + (s - 95.0) * 10.0            // 95-98 normal → 50-80
+        } else if s >= 90.0 {
+            20.0 + (s - 90.0) * 6.0             // 90-94 mild hypoxia → 20-50
         } else {
-            0.0
+            ((s - 70.0) / 20.0 * 20.0).max(0.0) // <90 significant → 0-20
         }
         .clamp(0.0, 100.0)
     }
