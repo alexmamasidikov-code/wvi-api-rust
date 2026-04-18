@@ -62,14 +62,57 @@ pub async fn phases(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Jso
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-pub async fn optimal_window(_user: AuthUser, State(_pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+pub async fn optimal_window(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let rows = sqlx::query_as::<_, (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<f32>)>(
+        "SELECT bedtime, wake_time, total_hours FROM sleep_records WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND bedtime IS NOT NULL ORDER BY date DESC LIMIT 14"
+    ).bind(&user.privy_did).fetch_all(&pool).await?;
+
+    if rows.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": { "bedtime": null, "wake": null, "wind_down": null, "target_minutes": 480, "reasoning": "Not enough sleep history yet — log a few nights to get a personalized window." }
+        })));
+    }
+
+    // Average bedtime as minutes-from-18:00 to handle the midnight wrap.
+    let mut bed_mins: Vec<i32> = Vec::with_capacity(rows.len());
+    let mut wake_mins: Vec<i32> = Vec::with_capacity(rows.len());
+    let mut durations: Vec<f64> = Vec::with_capacity(rows.len());
+    for (b, w, d) in &rows {
+        if let Some(b) = b {
+            let local = b.with_timezone(&chrono::Local);
+            use chrono::Timelike;
+            let mut m = local.hour() as i32 * 60 + local.minute() as i32;
+            if m < 18 * 60 { m += 24 * 60; }
+            bed_mins.push(m);
+        }
+        if let Some(w) = w {
+            use chrono::Timelike;
+            let local = w.with_timezone(&chrono::Local);
+            wake_mins.push(local.hour() as i32 * 60 + local.minute() as i32);
+        }
+        if let Some(d) = d { durations.push(*d as f64); }
+    }
+
+    let avg_bed = bed_mins.iter().sum::<i32>() as f64 / bed_mins.len().max(1) as f64;
+    let avg_wake = if !wake_mins.is_empty() { wake_mins.iter().sum::<i32>() as f64 / wake_mins.len() as f64 } else { 6.5 * 60.0 };
+    let avg_dur = if !durations.is_empty() { durations.iter().sum::<f64>() / durations.len() as f64 } else { 8.0 };
+
+    let shift = if avg_dur < 7.0 { -15.0 } else { 0.0 };
+    let rec_bed = (avg_bed + shift).rem_euclid(24.0 * 60.0);
+    let wind_down = (rec_bed - 30.0).rem_euclid(24.0 * 60.0);
+    let fmt = |m: f64| { let mm = m.round() as i32; format!("{:02}:{:02}", (mm / 60) % 24, mm % 60) };
+    let bedtime_s = fmt(rec_bed);
+    let wake_s = fmt(avg_wake);
+    let wind_s = fmt(wind_down);
+    let target_min = (avg_dur.max(7.5) * 60.0).round() as i32;
+    let reasoning = format!(
+        "Based on your {}-night average, your body winds down around {}. Aim for bed by {} to hit {:.1}h with your typical {} wake.",
+        rows.len(), wind_s, bedtime_s, (target_min as f64) / 60.0, wake_s
+    );
+
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": {
-            "bedtime": "22:30",
-            "wakeTime": "06:30",
-            "duration": "8h",
-            "note": "Based on your chronotype and activity patterns"
-        }
+        "data": { "bedtime": bedtime_s, "wake": wake_s, "wind_down": wind_s, "target_minutes": target_min, "reasoning": reasoning }
     })))
 }

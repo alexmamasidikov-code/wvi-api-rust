@@ -285,9 +285,60 @@ pub async fn circadian(user: AuthUser, State(pool): State<PgPool>) -> AppResult<
     Ok(Json(serde_json::json!({ "success": true, "data": { "hourly": hourly.to_vec() } })))
 }
 
-/// GET /wvi/correlations
-pub async fn correlations(_user: AuthUser, State(_pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({ "success": true, "data": { "hrv_wvi": 0.82, "stress_wvi": -0.75, "sleep_wvi": 0.68, "steps_wvi": 0.52, "activity_wvi": 0.45, "spo2_wvi": 0.38 } })))
+/// GET /wvi/correlations — Pearson r between daily WVI and each biometric factor (30d).
+pub async fn correlations(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let rows = sqlx::query_as::<_, (chrono::NaiveDate, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)>(
+        r#"WITH days AS (
+             SELECT generate_series((NOW() - INTERVAL '30 days')::date, NOW()::date, INTERVAL '1 day')::date AS d
+           ),
+           uid AS (SELECT id FROM users WHERE privy_did = $1)
+           SELECT d.d,
+                  (SELECT AVG(wvi_score)::float8 FROM wvi_scores w WHERE w.user_id = (SELECT id FROM uid) AND w.timestamp::date = d.d),
+                  (SELECT AVG(rmssd)::float8 FROM hrv h WHERE h.user_id = (SELECT id FROM uid) AND h.timestamp::date = d.d),
+                  (SELECT sleep_score::float8 FROM sleep_records s WHERE s.user_id = (SELECT id FROM uid) AND s.date = d.d),
+                  (SELECT MAX(steps)::float8 FROM activity a WHERE a.user_id = (SELECT id FROM uid) AND a.timestamp::date = d.d),
+                  (SELECT AVG(stress)::float8 FROM hrv h WHERE h.user_id = (SELECT id FROM uid) AND h.timestamp::date = d.d),
+                  (SELECT AVG(value)::float8 FROM spo2 s WHERE s.user_id = (SELECT id FROM uid) AND s.timestamp::date = d.d),
+                  (SELECT AVG(value)::float8 FROM temperature t WHERE t.user_id = (SELECT id FROM uid) AND t.timestamp::date = d.d)
+           FROM days d
+           ORDER BY d.d"#
+    ).bind(&user.privy_did).fetch_all(&pool).await?;
+
+    fn pearson(xs: &[f64], ys: &[f64]) -> Option<f64> {
+        if xs.len() < 7 { return None; }
+        let n = xs.len() as f64;
+        let mx = xs.iter().sum::<f64>() / n;
+        let my = ys.iter().sum::<f64>() / n;
+        let (mut num, mut dx2, mut dy2) = (0.0, 0.0, 0.0);
+        for i in 0..xs.len() {
+            let dx = xs[i] - mx;
+            let dy = ys[i] - my;
+            num += dx * dy; dx2 += dx * dx; dy2 += dy * dy;
+        }
+        let denom = (dx2 * dy2).sqrt();
+        if denom < 1e-9 { None } else { Some(((num / denom) * 100.0).round() / 100.0) }
+    }
+
+    let factors: [(&str, fn(&(chrono::NaiveDate, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)) -> Option<f64>); 6] = [
+        ("HRV",    |r| r.2),
+        ("Sleep",  |r| r.3),
+        ("Steps",  |r| r.4),
+        ("Stress", |r| r.5),
+        ("SpO2",   |r| r.6),
+        ("Temp",   |r| r.7),
+    ];
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for (name, sel) in factors {
+        let (mut w, mut f) = (Vec::new(), Vec::new());
+        for r in &rows {
+            if let Some(fv) = sel(r) { w.push(r.1); f.push(fv); }
+        }
+        if let Some(rv) = pearson(&w, &f) {
+            out.push(serde_json::json!({ "factor": name, "correlation": rv, "a": "WVI", "b": name, "r": rv }));
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "success": true, "data": { "correlations": out, "pairs": out } })))
 }
 
 /// GET /wvi/breakdown

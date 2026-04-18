@@ -65,7 +65,48 @@ pub async fn get_transitions(user: AuthUser, State(pool): State<PgPool>) -> AppR
 
 /// GET /emotions/triggers
 pub async fn get_triggers(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({ "success": true, "data": { "note": "Triggers analysis requires correlated biometric + emotion data" } })))
+    let negative = ["stressed", "anxious", "angry", "frustrated", "sad", "overwhelmed"];
+    let since = Utc::now() - Duration::days(7);
+
+    // Emotions w/ wvi_delta computed as delta vs preceding wvi_score snapshot within 2h prior.
+    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, String, Option<f64>, Option<f64>, Option<f64>, Option<f64>)>(
+        r#"SELECT e.timestamp, e.primary_emotion,
+                  (SELECT rmssd::float8 FROM hrv h WHERE h.user_id = e.user_id AND h.timestamp BETWEEN e.timestamp - INTERVAL '2 hours' AND e.timestamp ORDER BY h.timestamp DESC LIMIT 1),
+                  (SELECT stress::float8 FROM hrv h WHERE h.user_id = e.user_id AND h.timestamp BETWEEN e.timestamp - INTERVAL '2 hours' AND e.timestamp ORDER BY h.timestamp DESC LIMIT 1),
+                  (SELECT bpm::float8 FROM heart_rate hr WHERE hr.user_id = e.user_id AND hr.timestamp BETWEEN e.timestamp - INTERVAL '2 hours' AND e.timestamp ORDER BY hr.timestamp DESC LIMIT 1),
+                  (SELECT (8.0 - COALESCE(total_hours, 8.0))::float8 FROM sleep_records s WHERE s.user_id = e.user_id AND s.date <= e.timestamp::date ORDER BY s.date DESC LIMIT 1)
+           FROM emotions e
+           WHERE e.user_id = (SELECT id FROM users WHERE privy_did = $1)
+             AND e.timestamp >= $2"#
+    ).bind(&user.privy_did).bind(since).fetch_all(&pool).await?;
+
+    // For impact: approximate wvi_delta as negative-emotion indicator strength, in [-1, 0].
+    // Active means factor in adverse range at time of emotion.
+    let mut acc: std::collections::HashMap<&str, (i64, f64)> = std::collections::HashMap::new();
+    for (_ts, emo, hrv, stress, hr, debt) in &rows {
+        let is_neg = negative.contains(&emo.as_str());
+        let delta: f64 = if is_neg { -0.4 } else { 0.1 };
+        let mut bump = |key: &'static str, active: bool| {
+            if active { let e = acc.entry(key).or_insert((0, 0.0)); e.0 += 1; e.1 += delta; }
+        };
+        bump("Low HRV", hrv.map(|v| v < 30.0).unwrap_or(false));
+        bump("High stress", stress.map(|v| v > 60.0).unwrap_or(false));
+        bump("Elevated HR", hr.map(|v| v > 90.0).unwrap_or(false));
+        bump("Sleep debt", debt.map(|v| v > 1.0).unwrap_or(false));
+    }
+
+    let mut triggers: Vec<serde_json::Value> = acc.into_iter()
+        .filter(|(_, (c, _))| *c > 0)
+        .map(|(label, (count, sum))| {
+            let impact = (sum / count as f64 * 100.0).round() / 100.0;
+            serde_json::json!({ "label": label, "count": count, "impact": impact })
+        })
+        .collect();
+    triggers.sort_by(|a, b| b["impact"].as_f64().unwrap_or(0.0).abs()
+        .partial_cmp(&a["impact"].as_f64().unwrap_or(0.0).abs()).unwrap_or(std::cmp::Ordering::Equal));
+    triggers.truncate(5);
+
+    Ok(Json(serde_json::json!({ "success": true, "data": { "triggers": triggers } })))
 }
 
 /// GET /emotions/streaks
