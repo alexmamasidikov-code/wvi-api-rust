@@ -432,7 +432,7 @@ async fn async_main() {
         .route("/api/v1/family/average", get(family::handlers::average))
         .route("/api/v1/family/alerts", get(family::handlers::alerts))
         .route("/api/v1/family/invite", post(family::handlers::invite))
-        .route("/api/v1/family/accept/:id", post(family::handlers::accept))
+        .route("/api/v1/family/accept/{id}", post(family::handlers::accept))
 
         // ═══ HEALTH (5 — PUBLIC) ═══
         .route("/api/v1/health/server-status", get(health::handlers::server_status))
