@@ -1,6 +1,6 @@
 use axum::{extract::{Query, State}, Extension, Json};
 use chrono::{Utc, Duration};
-use sqlx::PgPool;
+use sqlx::{PgPool, QueryBuilder, Postgres};
 use crate::auth::middleware::AuthUser;
 use crate::error::AppResult;
 use crate::emotions::engine::EmotionEngine;
@@ -600,76 +600,117 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
     let mut latest_steps: Option<f64> = None;
     let mut latest_sleep_score: Option<f64> = None;
 
+    // Group records by type for batch INSERT — 680K single-row inserts would
+    // produce 680K round-trips and time out. Multi-value INSERT with up to
+    // 1000 tuples per statement cuts that to ~680 statements.
+    let f = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_f64());
+    let fo = |v: &serde_json::Value, k: &str| f(v, k).map(|x| x as f32);
+
+    let mut hr_rows: Vec<(chrono::DateTime<Utc>, f32)> = Vec::new();
+    let mut hrv_rows: Vec<(chrono::DateTime<Utc>, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<f32>)> = Vec::new();
+    let mut spo2_rows: Vec<(chrono::DateTime<Utc>, f32)> = Vec::new();
+    let mut temp_rows: Vec<(chrono::DateTime<Utc>, f32)> = Vec::new();
+    let mut act_rows: Vec<(chrono::DateTime<Utc>, Option<f32>, Option<f32>, Option<f32>, Option<f32>)> = Vec::new();
+
     for rec in &body.records {
         match rec.record_type.as_str() {
             "heart_rate" => {
-                if let Some(bpm) = rec.data.get("bpm").and_then(|v| v.as_f64()) {
-                    sqlx::query("INSERT INTO heart_rate (user_id, timestamp, bpm) VALUES ($1, $2, $3)")
-                        .bind(uid).bind(rec.timestamp).bind(bpm as f32).execute(&pool).await?;
+                if let Some(bpm) = f(&rec.data, "bpm") {
+                    hr_rows.push((rec.timestamp, bpm as f32));
                     latest_hr = Some(bpm);
                     processed += 1;
                 }
             }
             "hrv" => {
-                let rmssd_opt = rec.data.get("rmssd").and_then(|v| v.as_f64());
-                // Drop JCV8 firmware placeholder of exactly 70.0 ms — it floods
-                // the database with a fake reading when no real stillness
-                // measurement is available.
+                let rmssd_opt = f(&rec.data, "rmssd");
+                // Drop JCV8 firmware placeholder of exactly 70.0 ms.
                 if rmssd_opt == Some(70.0) { continue; }
-                sqlx::query("INSERT INTO hrv (user_id, timestamp, rmssd, stress, heart_rate, systolic_bp, diastolic_bp) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-                    .bind(uid).bind(rec.timestamp)
-                    .bind(rmssd_opt.map(|v| v as f32))
-                    .bind(rec.data.get("stress").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .bind(rec.data.get("heartRate").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .bind(rec.data.get("systolicBP").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .bind(rec.data.get("diastolicBP").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .execute(&pool).await?;
-                if let Some(v) = rec.data.get("rmssd").and_then(|v| v.as_f64()) { latest_hrv = Some(v); }
-                if let Some(v) = rec.data.get("stress").and_then(|v| v.as_f64()) { latest_stress = Some(v); }
-                if let Some(v) = rec.data.get("systolicBP").and_then(|v| v.as_f64()) { latest_systolic_bp = Some(v); }
-                if let Some(v) = rec.data.get("heartRate").and_then(|v| v.as_f64()) {
+                hrv_rows.push((
+                    rec.timestamp,
+                    rmssd_opt.map(|v| v as f32),
+                    fo(&rec.data, "stress"),
+                    fo(&rec.data, "heartRate"),
+                    fo(&rec.data, "systolicBP"),
+                    fo(&rec.data, "diastolicBP"),
+                ));
+                if let Some(v) = rmssd_opt { latest_hrv = Some(v); }
+                if let Some(v) = f(&rec.data, "stress") { latest_stress = Some(v); }
+                if let Some(v) = f(&rec.data, "systolicBP") { latest_systolic_bp = Some(v); }
+                if let Some(v) = f(&rec.data, "heartRate") {
                     if latest_hr.is_none() { latest_hr = Some(v); }
                 }
                 processed += 1;
             }
             "spo2" => {
-                if let Some(val) = rec.data.get("value").and_then(|v| v.as_f64()) {
-                    sqlx::query("INSERT INTO spo2 (user_id, timestamp, value) VALUES ($1, $2, $3)")
-                        .bind(uid).bind(rec.timestamp).bind(val as f32).execute(&pool).await?;
+                if let Some(val) = f(&rec.data, "value") {
+                    spo2_rows.push((rec.timestamp, val as f32));
                     latest_spo2 = Some(val);
                     processed += 1;
                 }
             }
             "temperature" => {
-                if let Some(val) = rec.data.get("value").and_then(|v| v.as_f64()) {
+                if let Some(val) = f(&rec.data, "value") {
                     // Physiological wrist-skin range 32-42°C — drop off-wrist noise.
                     if !(32.0..=42.0).contains(&val) { continue; }
-                    sqlx::query("INSERT INTO temperature (user_id, timestamp, value) VALUES ($1, $2, $3)")
-                        .bind(uid).bind(rec.timestamp).bind(val as f32).execute(&pool).await?;
+                    temp_rows.push((rec.timestamp, val as f32));
                     latest_temp = Some(val);
                     processed += 1;
                 }
             }
             "activity" => {
-                sqlx::query("INSERT INTO activity (user_id, timestamp, steps, calories, active_minutes, mets) VALUES ($1, $2, $3, $4, $5, $6)")
-                    .bind(uid).bind(rec.timestamp)
-                    .bind(rec.data.get("steps").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .bind(rec.data.get("calories").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .bind(rec.data.get("activeMinutes").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .bind(rec.data.get("mets").and_then(|v| v.as_f64()).map(|v| v as f32))
-                    .execute(&pool).await?;
-                if let Some(v) = rec.data.get("steps").and_then(|v| v.as_f64()) { latest_steps = Some(v); }
+                act_rows.push((
+                    rec.timestamp,
+                    fo(&rec.data, "steps"),
+                    fo(&rec.data, "calories"),
+                    fo(&rec.data, "activeMinutes"),
+                    fo(&rec.data, "mets"),
+                ));
+                if let Some(v) = f(&rec.data, "steps") { latest_steps = Some(v); }
                 processed += 1;
             }
             "ppi" => {
-                if let Some(v) = rec.data.get("rmssd").and_then(|v| v.as_f64()) { latest_ppi_rmssd = Some(v); }
-                if let Some(v) = rec.data.get("coherence").and_then(|v| v.as_f64()) { latest_ppi_coherence = Some(v); }
+                if let Some(v) = f(&rec.data, "rmssd") { latest_ppi_rmssd = Some(v); }
+                if let Some(v) = f(&rec.data, "coherence") { latest_ppi_coherence = Some(v); }
             }
             "sleep" => {
-                if let Some(v) = rec.data.get("sleepScore").and_then(|v| v.as_f64()) { latest_sleep_score = Some(v); }
+                if let Some(v) = f(&rec.data, "sleepScore") { latest_sleep_score = Some(v); }
             }
             _ => {}
         }
+    }
+
+    // Chunked multi-value INSERTs. Postgres bind-param limit is 65535; keep
+    // well under it with 1000 rows per statement (max 7 params × 1000 = 7000).
+    const CHUNK: usize = 1000;
+
+    for chunk in hr_rows.chunks(CHUNK) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO heart_rate (user_id, timestamp, bpm) ");
+        qb.push_values(chunk, |mut b, r| { b.push_bind(uid).push_bind(r.0).push_bind(r.1); });
+        qb.build().execute(&pool).await?;
+    }
+    for chunk in hrv_rows.chunks(CHUNK) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO hrv (user_id, timestamp, rmssd, stress, heart_rate, systolic_bp, diastolic_bp) ");
+        qb.push_values(chunk, |mut b, r| {
+            b.push_bind(uid).push_bind(r.0).push_bind(r.1).push_bind(r.2).push_bind(r.3).push_bind(r.4).push_bind(r.5);
+        });
+        qb.build().execute(&pool).await?;
+    }
+    for chunk in spo2_rows.chunks(CHUNK) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO spo2 (user_id, timestamp, value) ");
+        qb.push_values(chunk, |mut b, r| { b.push_bind(uid).push_bind(r.0).push_bind(r.1); });
+        qb.build().execute(&pool).await?;
+    }
+    for chunk in temp_rows.chunks(CHUNK) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO temperature (user_id, timestamp, value) ");
+        qb.push_values(chunk, |mut b, r| { b.push_bind(uid).push_bind(r.0).push_bind(r.1); });
+        qb.build().execute(&pool).await?;
+    }
+    for chunk in act_rows.chunks(CHUNK) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO activity (user_id, timestamp, steps, calories, active_minutes, mets) ");
+        qb.push_values(chunk, |mut b, r| {
+            b.push_bind(uid).push_bind(r.0).push_bind(r.1).push_bind(r.2).push_bind(r.3).push_bind(r.4);
+        });
+        qb.build().execute(&pool).await?;
     }
 
     // ── Emotion detection ──────────────────────────────────────────────────────
