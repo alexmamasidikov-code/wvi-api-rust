@@ -307,10 +307,12 @@ async fn main() {
         .route("/api/v1/social/challenges", get(social::handlers::get_challenges))
         .route("/api/v1/social/leaderboard", get(social::handlers::get_leaderboard))
 
-        // ═══ FAMILY (3 — MOCK MVP) ═══
+        // ═══ FAMILY (5 — PostgreSQL) ═══
         .route("/api/v1/family/members", get(family::handlers::members))
         .route("/api/v1/family/average", get(family::handlers::average))
         .route("/api/v1/family/alerts", get(family::handlers::alerts))
+        .route("/api/v1/family/invite", post(family::handlers::invite))
+        .route("/api/v1/family/accept/:id", post(family::handlers::accept))
 
         // ═══ HEALTH (5 — PUBLIC) ═══
         .route("/api/v1/health/server-status", get(health::handlers::server_status))
@@ -339,7 +341,7 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!("WVI API starting on {addr}");
-    tracing::info!("121 endpoints registered across 18 modules");
+    tracing::info!("123 endpoints registered across 18 modules");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app)
