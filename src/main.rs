@@ -28,6 +28,7 @@ mod push;
 mod intraday;
 mod alarms;
 mod reminders;
+mod sensitivity;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};
