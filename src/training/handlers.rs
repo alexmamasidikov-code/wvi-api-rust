@@ -142,6 +142,62 @@ pub async fn overtraining_risk(user: AuthUser, State(pool): State<PgPool>) -> Ap
     })))
 }
 
+/// GET /api/v1/training/history — last 10 sessions from `activity`, mock fallback if none.
+pub async fn history(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = crate::biometrics::handlers::get_user_uuid(&pool, &user.privy_did).await?;
+
+    let rows = sqlx::query_as::<_, (Option<String>, Option<f32>, Option<f32>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT activity_type, active_minutes, calories, timestamp FROM activity \
+         WHERE user_id = $1 AND active_minutes IS NOT NULL AND active_minutes > 0 \
+         ORDER BY timestamp DESC LIMIT 10"
+    ).bind(uid).fetch_all(&pool).await.unwrap_or_default();
+
+    let mut sessions: Vec<serde_json::Value> = Vec::new();
+    for (atype, dur, cals, ts) in &rows {
+        let avg_hr = sqlx::query_scalar::<_, f64>(
+            "SELECT AVG(bpm)::float8 FROM heart_rate WHERE user_id = $1 \
+             AND timestamp BETWEEN $2 - INTERVAL '1 hour' AND $2"
+        ).bind(uid).bind(ts).fetch_optional(&pool).await.ok().flatten().unwrap_or(0.0);
+        sessions.push(serde_json::json!({
+            "activity": atype.clone().unwrap_or_else(|| "workout".into()),
+            "duration_min": dur.unwrap_or(0.0).round() as i32,
+            "calories": cals.unwrap_or(0.0).round() as i32,
+            "avg_hr": avg_hr.round() as i32,
+            "started_at": ts.to_rfc3339(),
+        }));
+    }
+
+    if sessions.is_empty() {
+        // Deterministic mock from privy_did hash (FNV-1a, same shape as family seed).
+        let mut h: u32 = 2166136261;
+        for b in user.privy_did.as_bytes() { h = h.wrapping_mul(16777619) ^ (*b as u32); }
+        let kinds = ["Running", "Cycling", "Strength", "Yoga", "Swimming"];
+        let count = 3 + (h % 3) as usize; // 3..=5
+        let now = chrono::Utc::now();
+        for i in 0..count {
+            let seed = h.wrapping_mul(16777619) ^ (i as u32);
+            let kind = kinds[(seed as usize) % kinds.len()];
+            let duration = 20 + (seed % 45) as i32;
+            let calories = 120 + (seed % 400) as i32;
+            let avg_hr = 110 + (seed % 50) as i32;
+            let started = now - chrono::Duration::days(i as i64 + 1)
+                - chrono::Duration::hours((seed % 6) as i64);
+            sessions.push(serde_json::json!({
+                "activity": kind,
+                "duration_min": duration,
+                "calories": calories,
+                "avg_hr": avg_hr,
+                "started_at": started.to_rfc3339(),
+            }));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "sessions": sessions }
+    })))
+}
+
 pub async fn optimal_time(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     let uid = crate::biometrics::handlers::get_user_uuid(&pool, &user.privy_did).await?;
 

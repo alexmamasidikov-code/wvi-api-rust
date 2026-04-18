@@ -268,11 +268,12 @@ async fn main() {
         .route("/api/v1/device/measure", post(device::handlers::measure))
         .route("/api/v1/device/firmware", get(device::handlers::firmware))
 
-        // ═══ TRAINING (4) ═══
+        // ═══ TRAINING (5) ═══
         .route("/api/v1/training/recommendation", get(training::handlers::recommendation))
         .route("/api/v1/training/weekly-plan", get(training::handlers::weekly_plan))
         .route("/api/v1/training/overtraining-risk", get(training::handlers::overtraining_risk))
         .route("/api/v1/training/optimal-time", get(training::handlers::optimal_time))
+        .route("/api/v1/training/history", get(training::handlers::history))
 
         // ═══ RISK (5) ═══
         .route("/api/v1/risk/assessment", get(risk::handlers::assessment))
