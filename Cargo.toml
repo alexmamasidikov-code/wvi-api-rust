@@ -82,6 +82,7 @@ tracing-opentelemetry = "0.25"
 sentry = { version = "0.34", default-features = false, features = ["backtrace","contexts","panic","reqwest","rustls","tracing"] }
 sentry-tower = { version = "0.34", features = ["http"] }
 sentry-tracing = "0.34"
+md5 = "0.8.0"
 
 [[bin]]
 name = "loadtest"
