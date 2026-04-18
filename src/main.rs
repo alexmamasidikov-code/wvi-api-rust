@@ -343,6 +343,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(track_request))
         .layer(axum_middleware::from_fn(security_headers))
+        .layer(axum_middleware::from_fn(auth::middleware::inject_refresh_hint))
         .layer(cors)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
         .layer(axum_middleware::from_fn(rate_limit_middleware))
