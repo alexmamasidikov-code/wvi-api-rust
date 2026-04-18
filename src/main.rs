@@ -147,6 +147,9 @@ async fn async_main() {
     let apns = push::apns::ApnsClient::new();
     push::scheduler::spawn_scheduler(pool.clone(), app_cache.clone(), apns.clone());
 
+    // Intraday 5-min downsampler + hourly rollup worker.
+    intraday::worker::spawn(pool.clone());
+
     // Metrics collector + periodic DB pool sampler (updates gauges every 5 s).
     let app_metrics = Metrics::new();
     spawn_pool_sampler(pool.clone(), app_metrics.clone());
