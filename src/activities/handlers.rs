@@ -49,11 +49,25 @@ pub async fn get_transitions(_user: AuthUser, State(_pool): State<PgPool>) -> Ap
 }
 
 pub async fn get_sedentary(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    let total_mins = sqlx::query_as::<_, (Option<f64>,)>(
-        "SELECT SUM(active_minutes)::float8 FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= CURRENT_DATE"
-    ).bind(&user.privy_did).fetch_one(&pool).await?.0.unwrap_or(0.0);
-    let sedentary = (16.0 * 60.0 - total_mins).max(0.0); // 16 waking hours
-    Ok(Json(serde_json::json!({ "success": true, "data": { "sedentaryMinutes": sedentary, "activeMinutes": total_mins, "ratio": if total_mins > 0.0 { sedentary / total_mins } else { 0.0 } } })))
+    // Device reports cumulative counters; clamp to a day window (0..1440) to avoid leaking lifetime totals.
+    let row = sqlx::query_as::<_, (Option<f64>, Option<i64>)>(
+        "SELECT LEAST(GREATEST(MAX(active_minutes)::float8 - MIN(active_minutes)::float8, 0.0), 1440.0), COUNT(*) \
+         FROM activity WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) \
+         AND timestamp >= CURRENT_DATE AND timestamp < CURRENT_DATE + INTERVAL '1 day'"
+    ).bind(&user.privy_did).fetch_one(&pool).await?;
+    let active_today = row.0.unwrap_or(0.0);
+    let samples = row.1.unwrap_or(0);
+    let sedentary = (16.0 * 60.0 - active_today).max(0.0).min(16.0 * 60.0);
+    let active_breaks = (samples / 2).max(0);
+    let longest_sit_min = sedentary.round() as i64;
+    Ok(Json(serde_json::json!({ "success": true, "data": {
+        "sedentary_minutes": sedentary.round() as i64,
+        "active_breaks": active_breaks,
+        "longest_sit_min": longest_sit_min,
+        "sedentaryMinutes": sedentary,
+        "activeMinutes": active_today,
+        "ratio": if active_today > 0.0 { sedentary / active_today } else { 0.0 }
+    } })))
 }
 
 pub async fn get_exercise_log(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
