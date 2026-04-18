@@ -241,6 +241,11 @@ async fn async_main() {
         .route("/api/v1/users/me", get(users::handlers::get_me).put(users::handlers::update_me))
         .route("/api/v1/users/me/norms", get(users::handlers::get_norms))
         .route("/api/v1/users/me/norms/calibrate", post(users::handlers::calibrate))
+        // Persona = HOME layout selector (Sprint 3, NPS uplift roadmap).
+        // Allowed values enforced application-side: athlete / professional / parent / curious.
+        .route("/api/v1/users/me/persona",
+               get(users::handlers::get_persona)
+                   .put(users::handlers::put_persona))
 
         // ═══ BIOMETRICS (18+) ═══
         .route("/api/v1/biometrics/sync", post(biometrics::handlers::sync))
