@@ -171,3 +171,22 @@ pub async fn get_baseline(
         None => Ok(Json(serde_json::json!({ "locked": false, "sample_count": 0 }))),
     }
 }
+
+/// Unread signal count for the last 7 days. Used by the HOME notification
+/// dot — wire via `GET /api/v1/signals/unread-count`.
+pub async fn get_unread_count(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+) -> AppResult<Json<serde_json::Value>> {
+    let user_id = crate::users::resolve_user_id(&pool, &user.privy_did)
+        .await
+        .map_err(AppError::from)?;
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM signals WHERE user_id=$1 AND NOT ack AND ts > NOW() - INTERVAL '7 days'"
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "count": row.0 })))
+}

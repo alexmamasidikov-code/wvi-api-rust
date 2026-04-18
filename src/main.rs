@@ -408,6 +408,7 @@ async fn async_main() {
 
         // ═══ SENSITIVITY (Project B — signals + baselines + contextual AI) ═══
         .route("/api/v1/signals", get(sensitivity::handlers::get_signals))
+        .route("/api/v1/signals/unread-count", get(sensitivity::handlers::get_unread_count))
         .route(
             "/api/v1/signals/{id}/ack",
             axum::routing::put(sensitivity::handlers::ack_signal),
