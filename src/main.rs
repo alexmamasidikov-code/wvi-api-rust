@@ -281,6 +281,12 @@ async fn async_main() {
         .route("/api/v1/emotions/triggers", get(emotions::handlers::get_triggers))
         .route("/api/v1/emotions/streaks", get(emotions::handlers::get_streaks))
 
+        // ═══ EMOTIONS v2 (Project C — 1-min 18-label triplet + metrics + narrator) ═══
+        .route("/api/v1/emotions/v2/intraday", get(emotions::v2::handlers::get_intraday))
+        .route("/api/v1/emotions/v2/metrics", get(emotions::v2::handlers::get_metrics))
+        .route("/api/v1/emotions/v2/narrative", get(emotions::v2::handlers::get_narrative))
+        .route("/api/v1/emotions/v2/triggers", get(emotions::v2::handlers::get_triggers))
+
         // ═══ ACTIVITIES (10) ═══
         .route("/api/v1/activities/current", get(activities::handlers::get_current))
         .route("/api/v1/activities/history", get(activities::handlers::get_history))
