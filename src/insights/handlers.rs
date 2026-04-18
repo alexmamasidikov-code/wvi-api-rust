@@ -35,7 +35,7 @@ pub async fn daily_win(
     user: AuthUser,
     State(pool): State<PgPool>,
 ) -> AppResult<Json<TodayWin>> {
-    let user_id_row: Option<(i64,)> = sqlx::query_as(
+    let user_id_row: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM users WHERE privy_did = $1",
     )
     .bind(&user.privy_did)
