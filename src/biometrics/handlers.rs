@@ -100,12 +100,17 @@ pub async fn get_spo2(user: AuthUser, State(pool): State<PgPool>, Query(q): Quer
 pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let mut count = 0i64;
+    let mut rejected = 0i64;
     for r in &body.records {
+        // Clamp SpO2 to physiological range 70-100%. Bracelet sensor occasionally
+        // reports spurious >100% or <70% values (off-wrist / poor contact).
+        let clamped = r.value.clamp(70.0, 100.0);
+        if (clamped - r.value).abs() > 0.1 { rejected += 1; }
         sqlx::query("INSERT INTO spo2 (user_id, timestamp, value) VALUES ($1, $2, $3)")
-            .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
+            .bind(uid).bind(r.timestamp).bind(clamped as f32).execute(&pool).await?;
         count += 1;
     }
-    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "spo2" } })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "spuriousClamped": rejected, "type": "spo2" } })))
 }
 
 // ═══ TEMPERATURE ═══
