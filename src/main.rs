@@ -237,6 +237,7 @@ async fn async_main() {
         .route("/api/v1/biometrics/sleep", get(biometrics::handlers::get_sleep).post(biometrics::handlers::post_sleep))
         .route("/api/v1/biometrics/ppi", get(biometrics::handlers::get_ppi).post(biometrics::handlers::post_ppi))
         .route("/api/v1/biometrics/ecg", get(biometrics::handlers::get_ecg).post(biometrics::handlers::post_ecg))
+        .route("/api/v1/biometrics/ecg/{id}", get(biometrics::handlers::get_ecg_by_id))
         .route("/api/v1/biometrics/activity", get(biometrics::handlers::get_activity).post(biometrics::handlers::post_activity))
         .route("/api/v1/biometrics/blood-pressure", get(biometrics::handlers::get_blood_pressure).post(biometrics::handlers::post_blood_pressure))
         .route("/api/v1/biometrics/stress", get(biometrics::handlers::get_stress))

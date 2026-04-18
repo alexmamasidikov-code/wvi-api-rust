@@ -430,14 +430,207 @@ specific time of day). \
 If the ECG analysis blob is missing or the recording too short for confident analysis, \
 say so explicitly and suggest a fresh 60-second measurement with the Wellex bracelet.";
 
+/// Body schema for the Project-F strict-JSON ECG interpretation path.
+/// All fields optional so the legacy "ask about the latest ECG" call
+/// (no body) still works and falls through to the cached narrative prompt.
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(default)]
+pub struct ECGInterpretBody {
+    pub samples: Option<Vec<f64>>,
+    #[serde(alias = "durationSeconds")]
+    pub duration_seconds: Option<i32>,
+    #[serde(alias = "sampleRate")]
+    pub sample_rate: Option<i32>,
+    #[serde(alias = "ecgId")]
+    pub ecg_id: Option<uuid::Uuid>,
+}
+
 pub async fn ecg_interpret(
     user: AuthUser,
     Extension(cache): Extension<AppCache>,
     State(pool): State<PgPool>,
-    Json(_body): Json<serde_json::Value>,
+    Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::EcgInterpret, ECG_INTERPRET_PROMPT).await;
-    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+    // Two modes:
+    //   1. Legacy (no samples): run the cached prose prompt against the
+    //      user's overall biometric context. This is what iOS panels call
+    //      when the user taps "Interpret my latest ECG" from the AI dossier.
+    //   2. Project-F strict-JSON (samples supplied): run a one-shot prompt
+    //      that must return a JSON blob matching the schema, persist it to
+    //      ecg.analysis_json, and fire a crisis push if is_crisis is set.
+    let body: ECGInterpretBody = serde_json::from_value(body).unwrap_or_default();
+
+    let Some(samples) = body.samples else {
+        // Legacy fall-through path — unchanged behaviour.
+        let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::EcgInterpret, ECG_INTERPRET_PROMPT).await;
+        return Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })));
+    };
+
+    let duration_seconds = body.duration_seconds.unwrap_or(30);
+    let sample_rate = body.sample_rate.unwrap_or(125);
+    let user_id = crate::users::resolve_user_id(&pool, &user.privy_did).await
+        .map_err(|e| crate::error::AppError::Database(e))?;
+
+    let prompt = crate::ai::cli::ecg_interpret_prompt(&samples, duration_seconds, sample_rate);
+
+    // First attempt — raw CLI call.
+    let first = crate::ai::cli::invoke_claude_cli(&prompt).await;
+    let parsed: Option<serde_json::Value> = first.as_ref().ok()
+        .and_then(|raw| extract_first_json_object(raw));
+
+    let analysis = if let Some(v) = parsed {
+        v
+    } else {
+        // Retry once with an explicit JSON-only reminder appended.
+        match crate::ai::cli::invoke_claude_cli_retry(
+            &prompt,
+            "Your previous response was not parseable JSON. Respond ONLY with the JSON object. No markdown, no commentary."
+        ).await {
+            Ok(raw) => extract_first_json_object(&raw).unwrap_or_else(|| {
+                tracing::warn!("ecg_interpret: retry also failed to yield JSON, falling back to null analysis");
+                serde_json::Value::Null
+            }),
+            Err(reason) => {
+                tracing::warn!(?reason, "ecg_interpret: CLI retry errored, falling back to null analysis");
+                serde_json::Value::Null
+            }
+        }
+    };
+
+    // Persist into ecg.analysis_json so GET /biometrics/ecg returns enriched data.
+    if let (Some(ecg_id), true) = (body.ecg_id, !analysis.is_null()) {
+        if let Err(e) = sqlx::query(
+            "UPDATE ecg SET analysis_json = $1 WHERE id = $2 AND user_id = $3"
+        )
+        .bind(&analysis)
+        .bind(ecg_id)
+        .bind(user_id)
+        .execute(&pool).await {
+            tracing::warn!(?e, ?ecg_id, "ecg_interpret: failed to persist analysis_json");
+        }
+    }
+
+    // Crisis dispatch — fire-and-forget so the HTTP response is fast.
+    if analysis.get("is_crisis").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let ecg_id = body.ecg_id;
+        let pool_c = pool.clone();
+        let analysis_c = analysis.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dispatch_ecg_crisis(&pool_c, user_id, ecg_id, &analysis_c).await {
+                tracing::warn!(?e, "dispatch_ecg_crisis failed");
+            }
+        });
+    }
+
+    Ok(Json(serde_json::json!({ "success": true, "data": analysis })))
+}
+
+/// Claude occasionally wraps the JSON in ```json fences or adds a leading
+/// apology line. Extract the first balanced `{...}` block and try to parse
+/// that instead of failing the whole pipeline.
+fn extract_first_json_object(raw: &str) -> Option<serde_json::Value> {
+    // Fast path: the output is already parseable.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) {
+        return Some(v);
+    }
+    // Walk the string and track brace depth until we close one balanced object.
+    let bytes = raw.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{')?;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for i in start..bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escape { escape = false; }
+            else if b == b'\\' { escape = true; }
+            else if b == b'"' { in_string = false; }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let slice = &raw[start..=i];
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {
+                        return Some(v);
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Send an ECG crisis APNs push with a 4h dedup window. Reuses the
+/// `push_notifications_log` table and the `ApnsClient::send_alert` pattern
+/// that Project D established for BP crisis pushes.
+async fn dispatch_ecg_crisis(
+    pool: &PgPool,
+    user_id: uuid::Uuid,
+    ecg_id: Option<uuid::Uuid>,
+    analysis: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let last: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "SELECT sent_at FROM push_notifications_log
+         WHERE user_id=$1 AND category='ecg_crisis'
+         ORDER BY sent_at DESC LIMIT 1"
+    ).bind(user_id).fetch_optional(pool).await?;
+    if let Some((last_ts,)) = last {
+        if chrono::Utc::now() - last_ts < chrono::Duration::hours(4) {
+            tracing::info!(?user_id, "ecg_crisis dedup: last push <4h ago");
+            return Ok(());
+        }
+    }
+
+    let hr = analysis
+        .pointer("/metrics/hr_mean")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let title = if hr > 0 {
+        format!("⚠️ ECG требует внимания — HR {} bpm", hr)
+    } else {
+        "⚠️ ECG требует внимания врача".to_string()
+    };
+    let body_text = analysis
+        .get("recommendation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Обратись к врачу — запись ECG вне нормы")
+        .to_string();
+
+    let tokens: Vec<String> = sqlx::query_scalar(
+        "SELECT token FROM push_tokens WHERE user_id=$1"
+    ).bind(user_id).fetch_all(pool).await.unwrap_or_default();
+
+    if tokens.is_empty() {
+        tracing::info!(?user_id, "ecg_crisis: no push tokens — skip");
+        return Ok(());
+    }
+
+    let apns = crate::push::apns::ApnsClient::new();
+    let deeplink = match ecg_id {
+        Some(id) => format!("wellex://body/ecg/{}", id),
+        None => "wellex://body/ecg".to_string(),
+    };
+    let mut sent = 0;
+    for token in &tokens {
+        match apns.send_alert(token, &title, &body_text, Some(&deeplink)).await {
+            Ok(()) => sent += 1,
+            Err(e) => tracing::warn!(?user_id, "apns ecg_crisis send failed: {e}"),
+        }
+    }
+
+    if sent > 0 {
+        sqlx::query(
+            "INSERT INTO push_notifications_log (user_id, category) VALUES ($1, 'ecg_crisis')"
+        ).bind(user_id).execute(pool).await?;
+    }
+
+    Ok(())
 }
 
 pub(crate) const RECOVERY_DEEP_PROMPT: &str = "Produce a deep recovery analysis: \
