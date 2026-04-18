@@ -47,7 +47,7 @@ dotenvy = "0.15"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time"] }
 
 # Error handling
 thiserror = "2"
@@ -70,6 +70,17 @@ prometheus = "0.13"
 
 # Rate limiting (tower_governor 0.7 — latest axum 0.8 compatible; 0.4 targets axum 0.7)
 tower_governor = "0.7"
+
+# OpenTelemetry — distributed tracing via OTLP/HTTP (Jaeger/Tempo/Grafana)
+opentelemetry = "0.24"
+opentelemetry-otlp = { version = "0.17", features = ["http-proto", "reqwest-client"] }
+opentelemetry_sdk = { version = "0.24", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.25"
+
+# Sentry — panic + HTTP + tracing capture
+sentry = { version = "0.34", default-features = false, features = ["backtrace","contexts","panic","reqwest","rustls","tracing"] }
+sentry-tower = { version = "0.34", features = ["http"] }
+sentry-tracing = "0.34"
 
 [[bin]]
 name = "loadtest"

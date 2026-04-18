@@ -50,8 +50,35 @@ use axum::http::{Request, StatusCode};
 
 use auth::privy::PrivyClient;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    dotenvy::dotenv().ok();
+
+    // Sentry — panic + HTTP + tracing capture. No-op if SENTRY_DSN is unset.
+    let _sentry_guard = std::env::var("SENTRY_DSN").ok().map(|dsn| {
+        sentry::init((dsn, sentry::ClientOptions {
+            release: sentry::release_name!(),
+            environment: Some(
+                std::env::var("APP_ENV").unwrap_or_else(|_| "development".into()).into()
+            ),
+            traces_sample_rate: 0.1,
+            ..Default::default()
+        }))
+    });
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build Tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
+    // OpenTelemetry — OTLP/HTTP span export with 5% head-based sampling.
+    // Endpoint: OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318/v1/traces).
+    // Sample ratio override: OTEL_TRACES_SAMPLER_ARG (default 0.05 = 5%).
+    // Set OTEL_SDK_DISABLED=true to skip exporter (local dev / tests).
+    let otel_layer = init_otel_tracer();
+
     // Structured logging for Loki/ELK.
     // LOG_FORMAT=json (prod default) → JSON with RFC3339 UTC timer.
     // LOG_FORMAT=pretty (dev default) → human-readable console output.
@@ -61,14 +88,16 @@ async fn main() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"))
         .add_directive("wvi=info".parse().unwrap());
-    let registry = tracing_subscriber::registry().with(filter);
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(otel_layer)
+        .with(sentry_tracing::layer());
     if log_format == "pretty" {
         registry.with(fmt::layer().pretty()).init();
     } else {
         registry.with(fmt::layer().json().with_timer(UtcTime::rfc_3339())).init();
     }
 
-    dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
 
     // Database pool — sized for 1M user scale
@@ -351,6 +380,7 @@ async fn main() {
         .layer(Extension(app_cache))
         .layer(Extension(app_metrics))
         .layer(Extension(privy))
+        .layer(axum_middleware::from_fn(sentry_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(track_request))
         .layer(axum_middleware::from_fn(trace_request_ctx))
@@ -376,6 +406,88 @@ async fn main() {
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
     tracing::info!("Shutdown signal received");
+}
+
+// ─── Structured request-context tracing ──────────────────────────────────────
+// Attaches `request_id`, `user_id`, `endpoint`, `latency_ms`, `status` on every
+// HTTP request as span fields — consumed by the JSON fmt layer for Loki/ELK.
+async fn trace_request_ctx(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::extract::MatchedPath;
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Non-reversible user hint — 8-char prefix of Bearer token, never the token itself.
+    let user_id = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|t| format!("u_{}", t.chars().take(8).collect::<String>()))
+        .unwrap_or_else(|| "anon".to_string());
+    let endpoint = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let method = req.method().as_str().to_string();
+    let span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        user_id = %user_id,
+        endpoint = %endpoint,
+        method = %method,
+        latency_ms = tracing::field::Empty,
+        status = tracing::field::Empty,
+    );
+    let _enter = span.enter();
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    span.record("latency_ms", latency_ms);
+    span.record("status", resp.status().as_u16());
+    tracing::info!(latency_ms, status = resp.status().as_u16(), "request completed");
+    resp
+}
+
+// ─── Sentry middleware ───────────────────────────────────────────────────────
+// Binds a per-request Sentry Hub (so breadcrumbs don't leak across requests),
+// attaches HTTP request context + starts a transaction for performance tracing.
+// No-op on the wire when SENTRY_DSN is unset — init() returns a disabled client.
+
+async fn sentry_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use sentry::protocol::{Event, Request as SentryRequest};
+    let hub = Arc::new(sentry::Hub::new_from_top(sentry::Hub::current()));
+    let method = req.method().to_string();
+    let uri = req.uri().to_string();
+    let tx_name = format!("{method} {}", req.uri().path());
+    let tx_ctx = sentry::TransactionContext::new(&tx_name, "http.server");
+    let tx = hub.start_transaction(tx_ctx);
+    hub.configure_scope(|scope| {
+        scope.set_tag("http.method", &method);
+        scope.add_event_processor(move |mut event: Event<'static>| {
+            event.request.get_or_insert_with(SentryRequest::default).method =
+                Some(method.clone());
+            event.request.as_mut().unwrap().url = uri.parse().ok();
+            Some(event)
+        });
+    });
+    let resp = sentry::Hub::run(hub, || async { next.run(req).await }).await;
+    tx.set_status(if resp.status().is_server_error() {
+        sentry::protocol::SpanStatus::InternalError
+    } else {
+        sentry::protocol::SpanStatus::Ok
+    });
+    tx.finish();
+    resp
 }
 
 // ─── Security headers middleware ─────────────────────────────────────────────
