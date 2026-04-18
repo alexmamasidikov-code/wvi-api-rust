@@ -13,7 +13,12 @@ RUN apt-get update && apt-get install -y \
 
 # Cache dependencies
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
+# Create dummy source for both the main bin and the extra [[bin]] loadtest.
+RUN mkdir -p src/bin \
+    && echo "fn main() {}" > src/main.rs \
+    && echo "fn main() {}" > src/bin/loadtest.rs \
+    && cargo build --release \
+    && rm -rf src
 
 # Build app
 COPY src/ src/
