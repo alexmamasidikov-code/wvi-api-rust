@@ -68,11 +68,23 @@ pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let records = body.get("records").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let mut count = 0i64;
+    let mut rejected_placeholder = 0i64;
     for r in &records {
+        // Accept both `rmssd` (canonical) and `value` (simple upload payload).
+        let rmssd_f = r.get("rmssd").and_then(|v| v.as_f64())
+            .or_else(|| r.get("value").and_then(|v| v.as_f64()));
+        // Reject known JCV8 firmware placeholders: 70.0 = "no data",
+        // 39.0 / 26.0 = quantized rest/stress categories (not real HRV).
+        if let Some(v) = rmssd_f {
+            if v == 70.0 || v == 39.0 || v == 26.0 {
+                rejected_placeholder += 1;
+                continue;
+            }
+        }
         sqlx::query("INSERT INTO hrv (user_id, timestamp, rmssd, stress, heart_rate, systolic_bp, diastolic_bp) VALUES ($1, $2, $3, $4, $5, $6, $7)")
             .bind(uid)
             .bind(r.get("timestamp").and_then(|v| v.as_str()).and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok()).unwrap_or_else(Utc::now))
-            .bind(r.get("rmssd").and_then(|v| v.as_f64()).map(|v| v as f32))
+            .bind(rmssd_f.map(|v| v as f32))
             .bind(r.get("stress").and_then(|v| v.as_f64()).map(|v| v as f32))
             .bind(r.get("heartRate").and_then(|v| v.as_f64()).map(|v| v as f32))
             .bind(r.get("systolicBP").and_then(|v| v.as_f64()).map(|v| v as f32))
@@ -80,7 +92,7 @@ pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
             .execute(&pool).await?;
         count += 1;
     }
-    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "hrv" } })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "rejectedPlaceholder": rejected_placeholder, "type": "hrv" } })))
 }
 
 // ═══ SpO2 ═══
