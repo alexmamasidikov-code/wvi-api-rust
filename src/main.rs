@@ -31,6 +31,7 @@ mod reminders;
 mod sensitivity;
 mod stress;
 mod narrator_schedule;
+mod insights;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};
@@ -375,6 +376,12 @@ async fn async_main() {
         .route("/api/v1/dashboard/widgets", get(dashboard::handlers::widgets))
         .route("/api/v1/dashboard/daily-brief", get(dashboard::handlers::daily_brief))
         .route("/api/v1/dashboard/evening-review", get(dashboard::handlers::evening_review))
+
+        // ═══ INSIGHTS (1) ═══
+        // /api/v1/insights/daily-win — single celebratory micro-fact for the
+        // HOME "TODAY'S WIN" card. Always returns 200 so the card stays
+        // visible even when no positive delta exists yet.
+        .route("/api/v1/insights/daily-win", get(insights::handlers::daily_win))
 
         // ═══ EXPORT (3) ═══
         .route("/api/v1/export/csv", get(export::handlers::csv_export))
