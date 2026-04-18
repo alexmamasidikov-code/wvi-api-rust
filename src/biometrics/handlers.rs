@@ -130,12 +130,15 @@ pub async fn get_temperature(user: AuthUser, State(pool): State<PgPool>, Query(q
 pub async fn post_temperature(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<BiometricUpload>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let mut count = 0i64;
+    let mut rejected = 0i64;
     for r in &body.records {
+        // Physiological wrist-skin range is 32-42°C. Reject off-wrist/poor-contact noise.
+        if !(32.0..=42.0).contains(&r.value) { rejected += 1; continue; }
         sqlx::query("INSERT INTO temperature (user_id, timestamp, value) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
         count += 1;
     }
-    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "temperature" } })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "rejected": rejected, "type": "temperature" } })))
 }
 
 // ═══ SLEEP ═══
@@ -593,6 +596,8 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
             }
             "temperature" => {
                 if let Some(val) = rec.data.get("value").and_then(|v| v.as_f64()) {
+                    // Physiological wrist-skin range 32-42°C — drop off-wrist noise.
+                    if !(32.0..=42.0).contains(&val) { continue; }
                     sqlx::query("INSERT INTO temperature (user_id, timestamp, value) VALUES ($1, $2, $3)")
                         .bind(uid).bind(rec.timestamp).bind(val as f32).execute(&pool).await?;
                     latest_temp = Some(val);
