@@ -26,7 +26,7 @@ mod events;
 mod push;
 
 use cache::AppCache;
-use metrics::Metrics;
+use metrics::{spawn_pool_sampler, track_request, Metrics};
 
 use std::sync::Arc;
 use axum::{
@@ -105,8 +105,9 @@ async fn main() {
     let apns = push::apns::ApnsClient::new();
     push::scheduler::spawn_scheduler(pool.clone(), app_cache.clone(), apns.clone());
 
-    // Metrics collector
+    // Metrics collector + periodic DB pool sampler (updates gauges every 5 s).
     let app_metrics = Metrics::new();
+    spawn_pool_sampler(pool.clone(), app_metrics.clone());
 
     // Seed challenges
     sqlx::query("INSERT INTO challenges (title, description, target_value, start_date, end_date) VALUES ('10K Steps Daily', 'Walk 10,000 steps every day', 10000, CURRENT_DATE, CURRENT_DATE + 7) ON CONFLICT DO NOTHING").execute(&pool).await.ok();
@@ -333,16 +334,14 @@ async fn main() {
         .route("/api/v1/docs.json", get(health::handlers::docs_json))
 
         // ═══ METRICS (Prometheus) ═══
-        .route("/metrics", get({
-            let m = app_metrics.clone();
-            move || async move { m.to_prometheus() }
-        }))
+        .route("/metrics", get(metrics::metrics_handler))
 
         .layer(Extension(event_bus))
         .layer(Extension(app_cache))
         .layer(Extension(app_metrics))
         .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
+        .layer(axum_middleware::from_fn(track_request))
         .layer(axum_middleware::from_fn(security_headers))
         .layer(cors)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
@@ -408,11 +407,6 @@ async fn rate_limit_middleware(
         .unwrap()
         .as_secs();
     let window_secs = 60; // 1 minute window
-
-    // Increment global request counter for metrics
-    if let Some(m) = req.extensions().get::<Metrics>() {
-        m.requests_total.fetch_add(1, Ordering::Relaxed);
-    }
 
     // Extract user identity: prefer user_id from auth, fallback to IP
     let user_key = req

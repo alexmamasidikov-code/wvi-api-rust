@@ -27,7 +27,13 @@ pub(crate) async fn cached_call(
     let key = cache_key(privy_did, kind);
     if let Some(hit) = cache.get_ai(&key).await {
         tracing::debug!(endpoint = ?kind, "AI cache hit for {}", privy_did);
+        if let Some(m) = crate::metrics::global() {
+            m.ai_cache_hits.inc();
+        }
         return hit;
+    }
+    if let Some(m) = crate::metrics::global() {
+        m.ai_cache_misses.inc();
     }
     let text = call_claude(pool, privy_did, kind, prompt).await;
     cache.set_ai(&key, text.clone()).await;
