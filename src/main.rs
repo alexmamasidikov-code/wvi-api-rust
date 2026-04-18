@@ -158,6 +158,10 @@ async fn async_main() {
     // + master switch align. No-op if no users have master enabled.
     reminders::evaluator::spawn(pool.clone(), apns.clone());
 
+    // Sensitivity — daily morning/evening AI narrators (Project B). Hourly
+    // tick, per-user TZ deferred to Project C.
+    sensitivity::narrator::spawn_daily_crons(pool.clone());
+
     // Metrics collector + periodic DB pool sampler (updates gauges every 5 s).
     let app_metrics = Metrics::new();
     spawn_pool_sampler(pool.clone(), app_metrics.clone());
@@ -378,6 +382,18 @@ async fn async_main() {
             "/api/v1/reminders/settings",
             get(reminders::handlers::get_settings).put(reminders::handlers::put_settings),
         )
+
+        // ═══ SENSITIVITY (Project B — signals + baselines + contextual AI) ═══
+        .route("/api/v1/signals", get(sensitivity::handlers::get_signals))
+        .route(
+            "/api/v1/signals/{id}/ack",
+            axum::routing::put(sensitivity::handlers::ack_signal),
+        )
+        .route(
+            "/api/v1/insights/contextual",
+            get(sensitivity::handlers::get_contextual),
+        )
+        .route("/api/v1/baselines", get(sensitivity::handlers::get_baseline))
 
         // ═══ AUDIT (1) ═══
         .route("/api/v1/audit/log", get(audit::get_audit_log))
