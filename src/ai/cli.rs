@@ -56,6 +56,8 @@ pub enum AiEndpointKind {
     FullAnalysis,
     EcgInterpret,
     RecoveryDeep,
+    // Per-tab narratives
+    BodyStory,
 }
 
 impl AiEndpointKind {
@@ -76,6 +78,7 @@ impl AiEndpointKind {
             Self::FullAnalysis => "full_analysis",
             Self::EcgInterpret => "ecg_interpret",
             Self::RecoveryDeep => "recovery_deep",
+            Self::BodyStory => "body_story",
         }
     }
 
@@ -123,6 +126,9 @@ impl AiEndpointKind {
             Self::RecoveryDeep =>
                 "Recovery analysis loading. Your HRV vs baseline + sleep quality + stress \
                 trend are being evaluated.",
+            Self::BodyStory =>
+                "Your body looks within normal range today. Cardiac, sleep and stress signals \
+                are all in a steady place. A detailed narrative will load shortly.",
         }
     }
 }
@@ -337,6 +343,7 @@ mod tests {
             AiEndpointKind::FullAnalysis,
             AiEndpointKind::EcgInterpret,
             AiEndpointKind::RecoveryDeep,
+            AiEndpointKind::BodyStory,
         ] {
             let t = kind.fallback_text();
             assert!(!t.is_empty(), "fallback text for {:?} should not be empty", kind);

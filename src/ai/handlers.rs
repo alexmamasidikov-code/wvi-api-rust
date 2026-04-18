@@ -334,6 +334,23 @@ pub async fn daily_brief(
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
+pub(crate) const BODY_STORY_PROMPT: &str = "Write a 2-sentence \"body story\" \
+for the BODY tab of this app — a calm, plain-language read of how the user's body \
+is doing right now. Sentence 1: cite ONE specific cardiac/sleep/stress signal with \
+its current value and what it implies (\"HR 65 bpm — your body is in a parasympathetic \
+state\"). Sentence 2: ONE concrete suggestion grounded in that observation \
+(walk, breathing, hydration, rest). Tone: calm coach. No emoji. No clinical jargon \
+the user wouldn't recognise. Max 35 words.";
+
+pub async fn body_story(
+    user: AuthUser,
+    Extension(cache): Extension<AppCache>,
+    State(pool): State<PgPool>,
+) -> AppResult<Json<serde_json::Value>> {
+    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::BodyStory, BODY_STORY_PROMPT).await;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
 pub(crate) const EVENING_REVIEW_PROMPT: &str = "Write a short evening review: \
 1) **What went right today** (one sentence, cite a metric). \
 2) **What could improve** (one sentence, cite a metric). \

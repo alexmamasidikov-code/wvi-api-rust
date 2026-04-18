@@ -388,6 +388,9 @@ async fn async_main() {
         // visible even when no positive delta exists yet.
         .route("/api/v1/insights/daily-win", get(insights::handlers::daily_win))
 
+        // ═══ AI body-story (BODY tab top narrative) ═══
+        .route("/api/v1/ai/body-story", get(ai::handlers::body_story))
+
         // ═══ EXPORT (3) ═══
         .route("/api/v1/export/csv", get(export::handlers::csv_export))
         .route("/api/v1/export/json", get(export::handlers::json_export))
