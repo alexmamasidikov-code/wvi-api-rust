@@ -355,6 +355,10 @@ async fn async_main() {
         // ═══ PUSH (APNs) ═══
         .route("/api/v1/notifications/register", post(push::handlers::register_token))
 
+        // ═══ INTRADAY (time-series + backfill) ═══
+        .route("/api/v1/intraday", get(intraday::handlers::get_intraday))
+        .route("/api/v1/intraday/backfill", post(intraday::handlers::post_backfill))
+
         // ═══ AUDIT (1) ═══
         .route("/api/v1/audit/log", get(audit::get_audit_log))
 
