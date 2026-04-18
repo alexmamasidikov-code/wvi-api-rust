@@ -11,19 +11,13 @@ RUN apt-get update && apt-get install -y \
     libsasl2-dev zlib1g-dev libzstd-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Cache dependencies
+# Copy full source and build in one stage.
+# Two-stage dep-caching was dropped because utoipa-swagger-ui's build.rs
+# fetches assets at compile time and fails non-deterministically in Docker.
 COPY Cargo.toml Cargo.lock ./
-# Create dummy source for both the main bin and the extra [[bin]] loadtest.
-RUN mkdir -p src/bin \
-    && echo "fn main() {}" > src/main.rs \
-    && echo "fn main() {}" > src/bin/loadtest.rs \
-    && cargo build --release \
-    && rm -rf src
-
-# Build app
 COPY src/ src/
 COPY migrations/ migrations/
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release --bin wvi-api
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
