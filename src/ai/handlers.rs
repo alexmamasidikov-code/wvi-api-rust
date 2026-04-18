@@ -17,6 +17,11 @@ pub(crate) fn cache_key(privy_did: &str, kind: AiEndpointKind) -> String {
 /// Unified entry: cache-read, miss → generate via call_claude, cache-write.
 /// All panel handlers use this so the cache fills on first hit and the
 /// prewarmer keeps it fresh.
+#[tracing::instrument(
+    name = "ai.cached_call",
+    skip_all,
+    fields(kind = kind.as_str(), user = privy_did, cache_hit = tracing::field::Empty)
+)]
 pub(crate) async fn cached_call(
     cache: &AppCache,
     pool: &PgPool,
@@ -24,14 +29,17 @@ pub(crate) async fn cached_call(
     kind: AiEndpointKind,
     prompt: &str,
 ) -> String {
+    let span = tracing::Span::current();
     let key = cache_key(privy_did, kind);
     if let Some(hit) = cache.get_ai(&key).await {
+        span.record("cache_hit", true);
         tracing::debug!(endpoint = ?kind, "AI cache hit for {}", privy_did);
         if let Some(m) = crate::metrics::global() {
             m.ai_cache_hits.inc();
         }
         return hit;
     }
+    span.record("cache_hit", false);
     if let Some(m) = crate::metrics::global() {
         m.ai_cache_misses.inc();
     }

@@ -403,11 +403,72 @@ async fn async_main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+
+    // Flush pending OTel batch spans before process exit.
+    opentelemetry::global::shutdown_tracer_provider();
 }
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
     tracing::info!("Shutdown signal received");
+}
+
+// ─── OpenTelemetry OTLP tracer ───────────────────────────────────────────────
+// Exports spans over OTLP/HTTP to the configured collector. Sampler is
+// ParentBased(TraceIdRatioBased(ratio)) — root traces are sampled at 5% by
+// default; child spans inherit the parent's decision so cross-service traces
+// stay consistent. Returns None (layer becomes a no-op) when OTEL_SDK_DISABLED=true
+// or the exporter fails to install.
+fn init_otel_tracer<S>() -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span> + Send + Sync,
+{
+    use opentelemetry::{trace::TracerProvider as _, KeyValue};
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::{trace as sdktrace, Resource};
+
+    if std::env::var("OTEL_SDK_DISABLED").ok().as_deref() == Some("true") {
+        return None;
+    }
+
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4318/v1/traces".into());
+    let ratio: f64 = std::env::var("OTEL_TRACES_SAMPLER_ARG")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0.05);
+    let service_name = std::env::var("OTEL_SERVICE_NAME")
+        .unwrap_or_else(|_| "wvi-api-rust".into());
+
+    let exporter = opentelemetry_otlp::new_exporter()
+        .http()
+        .with_endpoint(endpoint.clone())
+        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary);
+
+    let provider = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(exporter)
+        .with_trace_config(
+            sdktrace::Config::default()
+                .with_sampler(sdktrace::Sampler::ParentBased(Box::new(
+                    sdktrace::Sampler::TraceIdRatioBased(ratio),
+                )))
+                .with_resource(Resource::new(vec![
+                    KeyValue::new("service.name", service_name.clone()),
+                    KeyValue::new(
+                        "deployment.environment",
+                        std::env::var("APP_ENV").unwrap_or_else(|_| "development".into()),
+                    ),
+                ])),
+        )
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .ok()?;
+
+    let tracer = provider.tracer(service_name.clone());
+    opentelemetry::global::set_tracer_provider(provider);
+
+    eprintln!(
+        "OpenTelemetry OTLP tracer initialized: endpoint={endpoint} service={service_name} sample_ratio={ratio}"
+    );
+    Some(Box::new(tracing_opentelemetry::layer().with_tracer(tracer)))
 }
 
 // ─── Structured request-context tracing ──────────────────────────────────────

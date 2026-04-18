@@ -7,6 +7,7 @@ use super::models::*;
 use super::calculator::{WviV2Calculator, WviV2Input};
 
 /// GET /wvi/current — Calculate live WVI v2 from latest biometrics
+#[tracing::instrument(name = "wvi.compute_current", skip_all, fields(user = %user.privy_did))]
 pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     // Fetch latest biometrics
     let hr = sqlx::query_as::<_, (f32,)>("SELECT bpm FROM heart_rate WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1")

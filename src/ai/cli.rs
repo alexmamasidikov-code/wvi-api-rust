@@ -203,16 +203,43 @@ pub async fn invoke_claude_cli(prompt: &str) -> Result<String, String> {
     Ok(text)
 }
 
+/// Cheap non-cryptographic 64-bit hash of the prompt body. Used only as a
+/// span attribute so traces can be correlated across retries without leaking
+/// the full prompt text into the observability backend.
+fn prompt_hash_u64(prompt: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    prompt.hash(&mut h);
+    h.finish()
+}
+
 /// Full-context invoke: takes the per-endpoint kind + the complete prompt
 /// (system + biometric context + user question) and returns either the
 /// Claude response or the static fallback text.
 ///
 /// This is the function the handlers should call — it never fails, it
 /// always returns a user-facing string.
+#[tracing::instrument(
+    name = "ai.claude.invoke",
+    skip_all,
+    fields(
+        prompt.kind = kind.as_str(),
+        prompt.hash = %format!("{:016x}", prompt_hash_u64(prompt)),
+        prompt.bytes = prompt.len(),
+        response.cached = false,
+        response.ok = tracing::field::Empty,
+    )
+)]
 pub async fn ask_or_fallback(kind: AiEndpointKind, prompt: &str) -> String {
+    let span = tracing::Span::current();
     match invoke_claude_cli(prompt).await {
-        Ok(response) => response,
+        Ok(response) => {
+            span.record("response.ok", true);
+            response
+        }
         Err(reason) => {
+            span.record("response.ok", false);
             tracing::warn!(endpoint = ?kind, reason = %reason, "claude CLI unavailable, returning static fallback");
             kind.fallback_text().to_string()
         }
