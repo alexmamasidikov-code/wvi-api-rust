@@ -60,20 +60,30 @@ async fn main() {
     dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
 
-    // Database pool
-    let max_connections: u32 = std::env::var("MAX_DB_CONNECTIONS")
+    // Database pool — sized for 1M user scale
+    let max_connections: u32 = std::env::var("DATABASE_MAX_CONNECTIONS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    let min_connections: u32 = std::env::var("DATABASE_MIN_CONNECTIONS")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let acquire_timeout_secs: u64 = 5;
+    let idle_timeout_secs: u64 = 600;
 
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
-        .min_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .idle_timeout(std::time::Duration::from_secs(300))
+        .min_connections(min_connections)
+        .acquire_timeout(std::time::Duration::from_secs(acquire_timeout_secs))
+        .idle_timeout(Some(std::time::Duration::from_secs(idle_timeout_secs)))
         .connect(&cfg.database_url)
         .await
         .expect("Failed to connect to database");
 
-    tracing::info!("Connected to database (max_connections={max_connections})");
+    tracing::info!(
+        max_connections,
+        min_connections,
+        acquire_timeout_secs,
+        idle_timeout_secs,
+        "PG pool configured for 1M user scale"
+    );
 
     // Run migrations
     sqlx::migrate!("./migrations")
