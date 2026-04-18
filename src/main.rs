@@ -26,6 +26,8 @@ mod audit;
 mod events;
 mod push;
 mod intraday;
+mod alarms;
+mod reminders;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};
@@ -149,6 +151,11 @@ async fn async_main() {
 
     // Intraday 5-min downsampler + hourly rollup worker.
     intraday::worker::spawn(pool.clone());
+
+    // Proactive reminders evaluator (Project E) — tick every 5 min, dispatches
+    // APNs pushes for the six reminder types when biometric gates + windows
+    // + master switch align. No-op if no users have master enabled.
+    reminders::evaluator::spawn(pool.clone(), apns.clone());
 
     // Metrics collector + periodic DB pool sampler (updates gauges every 5 s).
     let app_metrics = Metrics::new();
@@ -358,6 +365,17 @@ async fn async_main() {
         // ═══ INTRADAY (time-series + backfill) ═══
         .route("/api/v1/intraday", get(intraday::handlers::get_intraday))
         .route("/api/v1/intraday/backfill", post(intraday::handlers::post_backfill))
+
+        // ═══ ALARMS (Project E — app-authoritative + Rust backup) ═══
+        .route("/api/v1/alarms/list", get(alarms::handlers::list_alarms))
+        .route("/api/v1/alarms/sync", post(alarms::handlers::sync_alarms))
+        .route("/api/v1/alarms/{id}", axum::routing::delete(alarms::handlers::delete_alarm))
+
+        // ═══ REMINDERS (Project E — 6 proactive reminder types) ═══
+        .route(
+            "/api/v1/reminders/settings",
+            get(reminders::handlers::get_settings).put(reminders::handlers::put_settings),
+        )
 
         // ═══ AUDIT (1) ═══
         .route("/api/v1/audit/log", get(audit::get_audit_log))
