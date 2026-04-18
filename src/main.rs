@@ -20,6 +20,7 @@ mod export;
 mod settings;
 mod health;
 mod social;
+mod family;
 mod audit;
 mod events;
 mod push;
@@ -305,6 +306,11 @@ async fn main() {
         .route("/api/v1/social/post", post(social::handlers::create_post))
         .route("/api/v1/social/challenges", get(social::handlers::get_challenges))
         .route("/api/v1/social/leaderboard", get(social::handlers::get_leaderboard))
+
+        // ═══ FAMILY (3 — MOCK MVP) ═══
+        .route("/api/v1/family/members", get(family::handlers::members))
+        .route("/api/v1/family/average", get(family::handlers::average))
+        .route("/api/v1/family/alerts", get(family::handlers::alerts))
 
         // ═══ HEALTH (5 — PUBLIC) ═══
         .route("/api/v1/health/server-status", get(health::handlers::server_status))
