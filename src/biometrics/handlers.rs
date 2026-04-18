@@ -249,6 +249,40 @@ pub async fn get_blood_pressure(user: AuthUser, State(pool): State<PgPool>, Quer
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
+/// POST /api/v1/biometrics/blood-pressure — bracelet-sourced BP readings.
+/// Accepts `{ records: [{ timestamp, systolic, diastolic }] }`. BP is stored
+/// in the existing `hrv` table's `systolic_bp`/`diastolic_bp` columns (see
+/// `get_blood_pressure` for the read path) so we don't need a new table.
+pub async fn post_blood_pressure(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let records = body.get("records").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut count = 0i64;
+    let mut rejected = 0i64;
+    for r in &records {
+        let sys = r.get("systolic").and_then(|v| v.as_f64()).map(|v| v as f32);
+        let dia = r.get("diastolic").and_then(|v| v.as_f64()).map(|v| v as f32);
+        // Physiological BP bounds — reject anything absurd to protect the DB.
+        let sys_ok = sys.map(|v| (70.0..=220.0).contains(&v)).unwrap_or(false);
+        let dia_ok = dia.map(|v| (40.0..=140.0).contains(&v)).unwrap_or(false);
+        let pair_ok = sys.zip(dia).map(|(s, d)| s > d).unwrap_or(false);
+        if !(sys_ok && dia_ok && pair_ok) {
+            rejected += 1;
+            continue;
+        }
+        let ts = r.get("timestamp").and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+            .unwrap_or_else(Utc::now);
+        sqlx::query("INSERT INTO hrv (user_id, timestamp, systolic_bp, diastolic_bp) VALUES ($1, $2, $3, $4)")
+            .bind(uid).bind(ts).bind(sys).bind(dia)
+            .execute(&pool).await?;
+        count += 1;
+    }
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "recordsSaved": count, "rejected": rejected, "type": "blood_pressure" }
+    })))
+}
+
 pub async fn get_stress(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(default_from);
     let to = q.to.unwrap_or_else(default_to);

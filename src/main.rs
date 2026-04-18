@@ -175,7 +175,7 @@ async fn main() {
         .route("/api/v1/biometrics/ppi", get(biometrics::handlers::get_ppi).post(biometrics::handlers::post_ppi))
         .route("/api/v1/biometrics/ecg", get(biometrics::handlers::get_ecg).post(biometrics::handlers::post_ecg))
         .route("/api/v1/biometrics/activity", get(biometrics::handlers::get_activity).post(biometrics::handlers::post_activity))
-        .route("/api/v1/biometrics/blood-pressure", get(biometrics::handlers::get_blood_pressure))
+        .route("/api/v1/biometrics/blood-pressure", get(biometrics::handlers::get_blood_pressure).post(biometrics::handlers::post_blood_pressure))
         .route("/api/v1/biometrics/stress", get(biometrics::handlers::get_stress))
         .route("/api/v1/biometrics/breathing-rate", get(biometrics::handlers::get_breathing_rate))
         .route("/api/v1/biometrics/rmssd", get(biometrics::handlers::get_rmssd))
