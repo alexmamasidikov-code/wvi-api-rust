@@ -207,29 +207,165 @@ pub async fn post_ppi(user: AuthUser, State(pool): State<PgPool>, Json(body): Js
 }
 
 // ═══ ECG ═══
-pub async fn get_ecg(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
-    let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(default_to);
-    let rows = sqlx::query_as::<_, (uuid::Uuid, chrono::DateTime<Utc>, Option<i32>, Option<i32>, Option<serde_json::Value>)>(
-        "SELECT id, timestamp, duration_seconds, sample_rate, analysis FROM ecg WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 50"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    let data: Vec<serde_json::Value> = rows.into_iter().map(|r| serde_json::json!({
-        "id": r.0, "timestamp": r.1, "durationSeconds": r.2, "sampleRate": r.3, "analysis": r.4
-    })).collect();
-    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+//
+// Project F — ECG Rework. Two sources share this table: the JCV8 bracelet's
+// single-lead stream and Apple Watch imports via HKElectrocardiogram. No
+// UNIQUE(user_id, timestamp) constraint exists (Project D finding: client
+// timestamps are fuzzy; adding one mid-stream is risky) — dedup is achieved
+// on the read path with ORDER BY timestamp DESC + client-side id hashing.
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ECGSource { Bracelet, AppleWatch }
+
+impl ECGSource {
+    pub fn as_str(&self) -> &'static str {
+        match self { Self::Bracelet => "bracelet", Self::AppleWatch => "apple_watch" }
+    }
 }
 
-pub async fn post_ecg(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
+fn default_ecg_source() -> ECGSource { ECGSource::Bracelet }
+
+#[derive(Debug, Deserialize)]
+pub struct PostECGBody {
+    #[serde(default)]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(alias = "durationSeconds")]
+    pub duration_seconds: Option<i32>,
+    #[serde(alias = "sampleRate")]
+    pub sample_rate: Option<i32>,
+    pub samples: Option<serde_json::Value>,
+    pub analysis: Option<serde_json::Value>,
+    #[serde(default = "default_ecg_source")]
+    pub source: ECGSource,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetECGQuery {
+    pub period: Option<String>,
+    pub source: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+fn ecg_period_start(period: Option<&str>) -> DateTime<Utc> {
+    match period {
+        Some("30d") => Utc::now() - Duration::days(30),
+        Some("3m") | Some("90d") => Utc::now() - Duration::days(90),
+        Some("1y") | Some("365d") => Utc::now() - Duration::days(365),
+        _ => Utc::now() - Duration::days(7),
+    }
+}
+
+pub async fn get_ecg(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Query(q): Query<GetECGQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let from = q.from.unwrap_or_else(|| ecg_period_start(q.period.as_deref()));
+    let to = q.to.unwrap_or_else(default_to);
+    let source_filter = q.source.as_deref().unwrap_or("all").to_string();
+
+    let rows = sqlx::query_as::<_, (
+        uuid::Uuid,
+        chrono::DateTime<Utc>,
+        Option<i32>,
+        Option<i32>,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    )>(
+        "SELECT id, timestamp, duration_seconds, sample_rate, source, analysis_json, analysis
+         FROM ecg
+         WHERE user_id = $1
+           AND timestamp BETWEEN $2 AND $3
+           AND ($4 = 'all' OR source = $4)
+         ORDER BY timestamp DESC LIMIT 50"
+    )
+    .bind(uid).bind(from).bind(to).bind(&source_filter)
+    .fetch_all(&pool).await?;
+
+    let items: Vec<serde_json::Value> = rows.into_iter().map(|(id, ts, dur, sr, src, analysis_json, legacy)| {
+        // Prefer the structured analysis_json (Project F) and fall back to the
+        // legacy free-form `analysis` column so historical rows still render.
+        let analysis = analysis_json.or(legacy);
+        serde_json::json!({
+            "id": id,
+            "timestamp": ts,
+            "duration_seconds": dur,
+            "sample_rate": sr,
+            "source": src,
+            "analysis": analysis,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "success": true, "data": items })))
+}
+
+pub async fn post_ecg(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(body): Json<PostECGBody>,
+) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO ecg (id, user_id, timestamp, duration_seconds, sample_rate, samples, analysis) VALUES ($1, $2, NOW(), $3, $4, $5, $6)")
-        .bind(id).bind(uid)
-        .bind(body.get("durationSeconds").and_then(|v| v.as_i64()).map(|v| v as i32))
-        .bind(body.get("sampleRate").and_then(|v| v.as_i64()).map(|v| v as i32))
-        .bind(body.get("samples"))
-        .bind(body.get("analysis"))
-        .execute(&pool).await?;
+    let ts = body.timestamp.unwrap_or_else(Utc::now);
+    sqlx::query(
+        "INSERT INTO ecg (id, user_id, timestamp, duration_seconds, sample_rate, samples, analysis, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+    )
+    .bind(id)
+    .bind(uid)
+    .bind(ts)
+    .bind(body.duration_seconds)
+    .bind(body.sample_rate)
+    .bind(body.samples)
+    .bind(body.analysis)
+    .bind(body.source.as_str())
+    .execute(&pool).await?;
     Ok(Json(serde_json::json!({ "success": true, "data": { "id": id, "type": "ecg" } })))
+}
+
+pub async fn get_ecg_by_id(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let row = sqlx::query_as::<_, (
+        chrono::DateTime<Utc>,
+        Option<i32>,
+        Option<i32>,
+        Option<serde_json::Value>,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    )>(
+        "SELECT timestamp, duration_seconds, sample_rate, samples, source, analysis_json, analysis
+         FROM ecg WHERE id = $1 AND user_id = $2"
+    )
+    .bind(id).bind(uid)
+    .fetch_optional(&pool).await?;
+
+    match row {
+        Some((ts, dur, sr, samples, src, analysis_json, legacy)) => {
+            let analysis = analysis_json.or(legacy);
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "id": id,
+                    "timestamp": ts,
+                    "duration_seconds": dur,
+                    "sample_rate": sr,
+                    "samples": samples,
+                    "source": src,
+                    "analysis": analysis,
+                }
+            })))
+        }
+        None => Err(AppError::NotFound(format!("ECG {} not found", id))),
+    }
 }
 
 // ═══ ACTIVITY ═══
