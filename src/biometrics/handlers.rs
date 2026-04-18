@@ -562,9 +562,14 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
                 }
             }
             "hrv" => {
+                let rmssd_opt = rec.data.get("rmssd").and_then(|v| v.as_f64());
+                // Drop JCV8 firmware placeholder of exactly 70.0 ms — it floods
+                // the database with a fake reading when no real stillness
+                // measurement is available.
+                if rmssd_opt == Some(70.0) { continue; }
                 sqlx::query("INSERT INTO hrv (user_id, timestamp, rmssd, stress, heart_rate, systolic_bp, diastolic_bp) VALUES ($1, $2, $3, $4, $5, $6, $7)")
                     .bind(uid).bind(rec.timestamp)
-                    .bind(rec.data.get("rmssd").and_then(|v| v.as_f64()).map(|v| v as f32))
+                    .bind(rmssd_opt.map(|v| v as f32))
                     .bind(rec.data.get("stress").and_then(|v| v.as_f64()).map(|v| v as f32))
                     .bind(rec.data.get("heartRate").and_then(|v| v.as_f64()).map(|v| v as f32))
                     .bind(rec.data.get("systolicBP").and_then(|v| v.as_f64()).map(|v| v as f32))
