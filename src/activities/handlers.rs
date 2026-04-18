@@ -88,13 +88,32 @@ pub async fn get_recovery_status(user: AuthUser, State(pool): State<PgPool>) -> 
 
 pub async fn manual_log(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
     let uid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE privy_did = $1").bind(&user.privy_did).fetch_optional(&pool).await?.ok_or_else(|| crate::error::AppError::NotFound("User not found".into()))?;
+    let steps = body.get("steps").and_then(|v| v.as_f64());
+    let calories = body.get("calories").and_then(|v| v.as_f64());
+    let active_minutes = body.get("activeMinutes").and_then(|v| v.as_f64());
+    let mets = body.get("mets").and_then(|v| v.as_f64());
+    let activity_type = body.get("activityType").and_then(|v| v.as_str()).map(|s| s.to_string());
     sqlx::query("INSERT INTO activity (user_id, timestamp, steps, calories, active_minutes, mets, activity_type) VALUES ($1, NOW(), $2, $3, $4, $5, $6)")
         .bind(uid)
-        .bind(body.get("steps").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("calories").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("activeMinutes").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("mets").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("activityType").and_then(|v| v.as_str()))
+        .bind(steps.map(|v| v as f32))
+        .bind(calories.map(|v| v as f32))
+        .bind(active_minutes.map(|v| v as f32))
+        .bind(mets.map(|v| v as f32))
+        .bind(activity_type.as_deref())
         .execute(&pool).await?;
+    // Intraday: workout event + activity_intensity sample.
+    let ts = Utc::now();
+    if let Some(m) = mets {
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, ts, "activity_intensity".to_string(), m);
+    }
+    if let Some(ref kind) = activity_type {
+        let meta = serde_json::json!({
+            "kind": kind,
+            "active_minutes": active_minutes,
+            "calories": calories,
+            "mets": mets,
+        });
+        crate::intraday::ingest::spawn_write_event(pool.clone(), uid, ts, "workout".to_string(), meta);
+    }
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": "Activity logged" } })))
 }

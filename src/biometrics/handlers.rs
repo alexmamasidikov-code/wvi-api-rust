@@ -252,6 +252,20 @@ pub async fn post_activity(user: AuthUser, State(pool): State<PgPool>, Validated
         .bind(body.mets.map(|v| v as f32))
         .bind(body.activity_type.as_deref())
         .execute(&pool).await?;
+    // Intraday: emit 1-min activity_intensity sample (MET proxy) + workout event if type known.
+    let ts = Utc::now();
+    if let Some(m) = body.mets {
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, ts, "activity_intensity".to_string(), m);
+    }
+    if let Some(kind) = body.activity_type.as_deref() {
+        let meta = serde_json::json!({
+            "kind": kind,
+            "active_minutes": body.active_minutes,
+            "calories": body.calories,
+            "mets": body.mets,
+        });
+        crate::intraday::ingest::spawn_write_event(pool.clone(), uid, ts, "workout".to_string(), meta);
+    }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": 1, "type": "activity" } })))
 }
 
