@@ -121,10 +121,18 @@ pub async fn overtraining_risk(user: AuthUser, State(pool): State<PgPool>) -> Ap
         _ => "Training load is appropriate. Continue current plan.",
     };
 
+    let mut factors: Vec<&str> = Vec::new();
+    if hrv_drop_pct > 20.0 { factors.push("HRV dropped 20%+ vs baseline"); }
+    else if hrv_drop_pct > 10.0 { factors.push("HRV trending down vs baseline"); }
+    if resting_hr > 90.0 { factors.push("Resting HR elevated"); }
+    else if resting_hr > 80.0 { factors.push("Resting HR slightly elevated"); }
+    if hrv_now < 30.0 { factors.push("Sleep debt accumulating"); }
+
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
-            "riskLevel": risk_level,
+            "risk": risk_level,
+            "factors": factors,
             "hrvDrop": (hrv_drop_pct * 10.0).round() / 10.0,
             "hrvNow": (hrv_now * 10.0).round() / 10.0,
             "hrvBaseline": (hrv_baseline * 10.0).round() / 10.0,

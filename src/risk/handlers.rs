@@ -101,16 +101,16 @@ pub async fn chronic_flags(user: AuthUser, State(pool): State<PgPool>) -> AppRes
     let mut flags: Vec<serde_json::Value> = vec![];
 
     if avg_hr > 85.0 {
-        flags.push(serde_json::json!({ "flag": "Chronically elevated resting HR", "value": avg_hr, "threshold": 85.0, "severity": "moderate" }));
+        flags.push(serde_json::json!({ "label": "Chronically elevated resting HR", "value": avg_hr, "threshold": 85.0, "severity": "moderate" }));
     }
     if avg_spo2 > 0.0 && avg_spo2 < 96.0 {
-        flags.push(serde_json::json!({ "flag": "Persistently low SpO2", "value": avg_spo2, "threshold": 96.0, "severity": "elevated" }));
+        flags.push(serde_json::json!({ "label": "Persistently low SpO2", "value": avg_spo2, "threshold": 96.0, "severity": "elevated" }));
     }
     if avg_hrv > 0.0 && avg_hrv < 30.0 {
-        flags.push(serde_json::json!({ "flag": "Chronically low HRV", "value": avg_hrv, "threshold": 30.0, "severity": "moderate" }));
+        flags.push(serde_json::json!({ "label": "Chronically low HRV", "value": avg_hrv, "threshold": 30.0, "severity": "moderate" }));
     }
     if avg_sleep > 0.0 && avg_sleep < 6.5 {
-        flags.push(serde_json::json!({ "flag": "Chronic sleep deprivation", "value": avg_sleep, "threshold": 6.5, "severity": "elevated" }));
+        flags.push(serde_json::json!({ "label": "Chronic sleep deprivation", "value": avg_sleep, "threshold": 6.5, "severity": "elevated" }));
     }
 
     Ok(Json(serde_json::json!({

@@ -36,10 +36,12 @@ pub async fn consistency(user: AuthUser, State(pool): State<PgPool>) -> AppResul
         "SELECT total_hours FROM sleep_records WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY date DESC LIMIT 14"
     ).bind(&user.privy_did).fetch_all(&pool).await?;
     let hours: Vec<f64> = rows.iter().filter_map(|r| r.0.map(|v| v as f64)).collect();
+    let days: Vec<i32> = hours.iter().map(|h| (h * 60.0).round() as i32).collect();
     let avg = if hours.is_empty() { 0.0 } else { hours.iter().sum::<f64>() / hours.len() as f64 };
     let variance = if hours.len() > 1 { hours.iter().map(|h| (h - avg).powi(2)).sum::<f64>() / hours.len() as f64 } else { 0.0 };
     let consistency_score = (100.0 - variance * 10.0).clamp(0.0, 100.0);
-    Ok(Json(serde_json::json!({ "success": true, "data": { "consistencyScore": (consistency_score * 10.0).round() / 10.0, "avgHours": (avg * 10.0).round() / 10.0, "variance": (variance * 100.0).round() / 100.0 } })))
+    let stddev_min = (variance.sqrt() * 60.0 * 10.0).round() / 10.0;
+    Ok(Json(serde_json::json!({ "success": true, "data": { "consistency_pct": (consistency_score * 10.0).round() / 10.0, "stddev_min": stddev_min, "days": days, "avgHours": (avg * 10.0).round() / 10.0 } })))
 }
 
 pub async fn debt(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {

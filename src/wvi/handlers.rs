@@ -277,8 +277,12 @@ pub async fn circadian(user: AuthUser, State(pool): State<PgPool>) -> AppResult<
     let rows = sqlx::query_as::<_, (f64, Option<f64>)>(
         "SELECT EXTRACT(HOUR FROM timestamp)::float8 as hour, AVG(wvi_score)::float8 FROM wvi_scores WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '7 days' GROUP BY hour ORDER BY hour"
     ).bind(&user.privy_did).fetch_all(&pool).await?;
-    let data: Vec<serde_json::Value> = rows.into_iter().map(|r| serde_json::json!({ "hour": r.0 as u32, "avgWvi": r.1 })).collect();
-    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+    let mut hourly: [f64; 24] = [0.0; 24];
+    for (h, v) in rows {
+        let idx = (h as usize).min(23);
+        hourly[idx] = v.unwrap_or(0.0);
+    }
+    Ok(Json(serde_json::json!({ "success": true, "data": { "hourly": hourly.to_vec() } })))
 }
 
 /// GET /wvi/correlations
@@ -302,8 +306,8 @@ pub async fn compare(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Js
     let this_week = sqlx::query_as::<_, (Option<f64>,)>(
         "SELECT AVG(wvi_score)::float8 FROM wvi_scores WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp >= NOW() - INTERVAL '7 days'"
     ).bind(&user.privy_did).fetch_one(&pool).await?.0;
-    let last_week = sqlx::query_as::<_, (Option<f64>,)>(
-        "SELECT AVG(wvi_score)::float8 FROM wvi_scores WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days'"
+    let prev_month = sqlx::query_as::<_, (Option<f64>,)>(
+        "SELECT AVG(wvi_score)::float8 FROM wvi_scores WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN NOW() - INTERVAL '30 days' AND NOW() - INTERVAL '7 days'"
     ).bind(&user.privy_did).fetch_one(&pool).await?.0;
-    Ok(Json(serde_json::json!({ "success": true, "data": { "thisWeek": this_week, "lastWeek": last_week, "delta": this_week.unwrap_or(0.0) - last_week.unwrap_or(0.0) } })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "current_week_avg": this_week, "previous_month_avg": prev_month, "delta": this_week.unwrap_or(0.0) - prev_month.unwrap_or(0.0) } })))
 }
