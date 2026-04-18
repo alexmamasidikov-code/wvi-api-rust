@@ -311,7 +311,8 @@ mod tests {
 
     #[test]
     fn timeout_is_reasonable() {
-        assert_eq!(CLI_TIMEOUT, Duration::from_secs(30));
+        // Pass-5: raised 30s→90s for Sonnet 4.6 cold-start headroom.
+        assert_eq!(CLI_TIMEOUT, Duration::from_secs(90));
     }
 
     #[test]
