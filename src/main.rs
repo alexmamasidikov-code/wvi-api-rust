@@ -39,7 +39,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::HeaderValue;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{fmt, fmt::time::UtcTime, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
@@ -52,11 +52,21 @@ use auth::privy::PrivyClient;
 
 #[tokio::main]
 async fn main() {
-    // Init tracing — structured JSON logging
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with(fmt::layer().json())
-        .init();
+    // Structured logging for Loki/ELK.
+    // LOG_FORMAT=json (prod default) → JSON with RFC3339 UTC timer.
+    // LOG_FORMAT=pretty (dev default) → human-readable console output.
+    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
+    let default_fmt = if app_env == "production" { "json" } else { "pretty" };
+    let log_format = std::env::var("LOG_FORMAT").unwrap_or_else(|_| default_fmt.into());
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("wvi=info".parse().unwrap());
+    let registry = tracing_subscriber::registry().with(filter);
+    if log_format == "pretty" {
+        registry.with(fmt::layer().pretty()).init();
+    } else {
+        registry.with(fmt::layer().json().with_timer(UtcTime::rfc_3339())).init();
+    }
 
     dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
@@ -343,6 +353,7 @@ async fn main() {
         .layer(Extension(privy))
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(track_request))
+        .layer(axum_middleware::from_fn(trace_request_ctx))
         .layer(axum_middleware::from_fn(security_headers))
         .layer(axum_middleware::from_fn(auth::middleware::inject_refresh_hint))
         .layer(cors)
@@ -382,20 +393,32 @@ async fn security_headers(
     response
 }
 
-// ─── Per-user rate limiter (60 req/min per user, 20 req/min unauthenticated) ─
+// ─── Per-user rate limiter ───────────────────────────────────────────────────
+// Reads: RATE_LIMIT_PER_SEC_READ (default 100) req/s per Bearer token.
+// Writes: RATE_LIMIT_PER_SEC_WRITE (default 20) req/s per Bearer token.
+// Anonymous (no Bearer): 10 req/s per IP (X-Forwarded-For / X-Real-IP).
+// /api/v1/health/* + /metrics bypass all limits. Over quota → 429 + Retry-After: 1.
 
 #[derive(Clone)]
 struct RateLimiterState {
-    /// Per-key buckets: key → (window_start_sec, request_count)
     buckets: Arc<Mutex<HashMap<String, (u64, u64)>>>,
-    /// Global request counter for metrics
     global_count: Arc<AtomicU64>,
+    read_limit: u64,
+    write_limit: u64,
+    anon_limit: u64,
 }
 
 fn rate_limiter_state() -> RateLimiterState {
+    let read_limit = std::env::var("RATE_LIMIT_PER_SEC_READ")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let write_limit = std::env::var("RATE_LIMIT_PER_SEC_WRITE")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let anon_limit: u64 = 10;
+    tracing::info!(read_limit, write_limit, anon_limit, "Rate limiter configured");
     RateLimiterState {
         buckets: Arc::new(Mutex::new(HashMap::new())),
         global_count: Arc::new(AtomicU64::new(0)),
+        read_limit, write_limit, anon_limit,
     }
 }
 
@@ -403,51 +426,49 @@ async fn rate_limit_middleware(
     Extension(state): Extension<RateLimiterState>,
     req: Request<axum::body::Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
+    let path = req.uri().path();
+    if path.starts_with("/api/v1/health/") || path == "/metrics" {
+        return Ok(next.run(req).await);
+    }
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let window_secs = 60; // 1 minute window
-
-    // Extract user identity: prefer user_id from auth, fallback to IP
-    let user_key = req
-        .headers()
-        .get("Authorization")
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let bearer = req.headers().get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            req.headers()
-                .get("x-forwarded-for")
+        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()));
+    let is_write = matches!(req.method().as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
+    let (key, limit) = match bearer {
+        Some(tok) => {
+            let prefix = if is_write { "w:" } else { "r:" };
+            let l = if is_write { state.write_limit } else { state.read_limit };
+            (format!("{prefix}{tok}"), l)
+        }
+        None => {
+            let ip = req.headers().get("x-forwarded-for")
                 .or_else(|| req.headers().get("x-real-ip"))
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or("anonymous")
-                .to_string()
-        });
-
-    let is_authenticated = req.headers().get("Authorization").is_some();
-    let limit: u64 = if is_authenticated { 60 } else { 20 };
-
-    // Check and update per-user bucket
+                .unwrap_or("anonymous").to_string();
+            (format!("a:{ip}"), state.anon_limit)
+        }
+    };
     {
         let mut buckets = state.buckets.lock().unwrap();
-        let entry = buckets.entry(user_key).or_insert((now, 0));
-        if now - entry.0 >= window_secs {
-            // New window
+        let entry = buckets.entry(key).or_insert((now, 0));
+        if now != entry.0 {
             *entry = (now, 1);
         } else {
             entry.1 += 1;
             if entry.1 > limit {
-                return Err(StatusCode::TOO_MANY_REQUESTS);
+                let mut resp = Response::new(axum::body::Body::from("Too Many Requests"));
+                *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                resp.headers_mut().insert("Retry-After", "1".parse().unwrap());
+                return Err(resp);
             }
         }
-
-        // Periodic cleanup: remove stale entries (every ~100 requests)
         state.global_count.fetch_add(1, Ordering::Relaxed);
-        if state.global_count.load(Ordering::Relaxed) % 100 == 0 {
-            buckets.retain(|_, (ts, _)| now - *ts < window_secs * 2);
+        if state.global_count.load(Ordering::Relaxed) % 500 == 0 {
+            buckets.retain(|_, (ts, _)| now.saturating_sub(*ts) < 5);
         }
     }
-
     Ok(next.run(req).await)
 }
