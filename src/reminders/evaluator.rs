@@ -118,10 +118,42 @@ async fn check_breathe(pool: &PgPool, user_id: Uuid) -> sqlx::Result<bool> {
     Ok(avg > 70.0)
 }
 
-async fn check_bedtime(_pool: &PgPool, _user_id: Uuid) -> sqlx::Result<bool> {
-    // Placeholder: bedtime window integration wired once /sleep/optimal-window
-    // persists recommendations. Until then rely on the fallback iOS scheduler.
-    Ok(false)
+async fn check_bedtime(pool: &PgPool, user_id: Uuid) -> sqlx::Result<bool> {
+    // Median bedtime from the last 7 days of `sleep_records`. Column is
+    // `bedtime TIMESTAMPTZ`; take the time-of-day component only.
+    let med_row: Option<(Option<chrono::NaiveTime>,)> = sqlx::query_as(
+        "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY bedtime::time)
+         FROM sleep_records
+         WHERE user_id = $1 AND date > CURRENT_DATE - 7 AND bedtime IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let target = med_row
+        .and_then(|(t,)| t)
+        .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap());
+
+    // Resolve user's timezone — it lives in `app_settings`, not `users`.
+    let tz_row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT timezone FROM app_settings WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let tz: chrono_tz::Tz = tz_row
+        .and_then(|(t,)| t)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(chrono_tz::UTC);
+
+    let now_local = Utc::now().with_timezone(&tz).naive_local();
+    let today_target = now_local.date().and_time(target);
+    let minutes_until = (today_target - now_local).num_minutes();
+
+    // Fire once in the 60..=65 min pre-bedtime window. The cron ticks every
+    // 5 min, so this slot guarantees exactly one hit per evening (the min
+    // interval guard prevents repeats on the next 5-min tick).
+    Ok((55..=65).contains(&minutes_until))
 }
 
 async fn check_move(pool: &PgPool, user_id: Uuid, local_hour: i16) -> sqlx::Result<bool> {
