@@ -64,3 +64,13 @@ rdkafka = { version = "0.36", features = ["cmake-build"] }
 
 # LRU cache
 lru = "0.12"
+
+# Prometheus metrics
+prometheus = "0.13"
+
+# Rate limiting (tower_governor 0.7 — latest axum 0.8 compatible; 0.4 targets axum 0.7)
+tower_governor = "0.7"
+
+[[bin]]
+name = "loadtest"
+path = "src/bin/loadtest.rs"
