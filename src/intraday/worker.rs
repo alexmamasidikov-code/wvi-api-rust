@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, DurationRound, Timelike, Utc};
 use sqlx::PgPool;
 use tokio::time::{interval, Duration as TokioDuration};
+use uuid::Uuid;
 
 pub async fn run_worker(pool: PgPool) {
     let mut tick = interval(TokioDuration::from_secs(60)); // check every minute
@@ -43,6 +44,42 @@ async fn run_5min_tick(pool: &PgPool, now: DateTime<Utc>) -> sqlx::Result<()> {
     .bind(bucket_end)   // $3 — upper bound (exclusive)
     .execute(pool)
     .await?;
+
+    // Project B — feed the freshly-aggregated bucket into the sensitivity
+    // detection + composite pipelines. Each metric evaluation is independent,
+    // so we fire-and-forget them concurrently per user/metric to keep the
+    // 5-min tick latency bounded. Errors are logged but never bubble up
+    // (downsampling must always succeed even if detection has a hiccup).
+    let users_metrics: Vec<(Uuid, String, f64)> = sqlx::query_as(
+        "SELECT user_id, metric_type, value_mean
+         FROM biometrics_5min WHERE bucket_ts=$1",
+    )
+    .bind(bucket_start)
+    .fetch_all(pool)
+    .await?;
+
+    for (user_id, metric, value) in users_metrics {
+        let ts = bucket_start;
+        // Activity state: placeholder Resting until Project C ingests
+        // activity_intensity into the sensitivity context directly.
+        let activity = crate::sensitivity::types::ActivityState::Resting;
+        let pool_c = pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::sensitivity::detection::evaluate_bucket(
+                &pool_c, user_id, &metric, ts, value, activity,
+            )
+            .await
+            {
+                tracing::warn!(?e, ?user_id, metric = %metric, "sensitivity::evaluate_bucket failed");
+            }
+            if let Err(e) =
+                crate::sensitivity::composite::evaluate(&pool_c, user_id).await
+            {
+                tracing::warn!(?e, ?user_id, "sensitivity::composite evaluate failed");
+            }
+        });
+    }
+
     Ok(())
 }
 
