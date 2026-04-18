@@ -25,6 +25,7 @@ mod family;
 mod audit;
 mod events;
 mod push;
+mod intraday;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};
