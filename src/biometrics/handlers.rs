@@ -1,8 +1,9 @@
 use axum::{extract::{Query, State}, Extension, Json};
-use chrono::{Utc, Duration};
+use chrono::{DateTime, Utc, Duration};
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, QueryBuilder, Postgres};
 use crate::auth::middleware::AuthUser;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::emotions::engine::EmotionEngine;
 use crate::events::{EventBus, BiometricEvent, TOPIC_BIOMETRICS};
 use crate::validation::ValidatedJson;
@@ -47,6 +48,7 @@ pub async fn post_heart_rate(user: AuthUser, State(pool): State<PgPool>, Validat
         sqlx::query("INSERT INTO heart_rate (user_id, timestamp, bpm) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32)
             .execute(&pool).await?;
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "hr".to_string(), r.value as f64);
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "heart_rate" } })))
@@ -88,6 +90,12 @@ pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(
             .bind(r.systolic_bp.map(|v| v as f32))
             .bind(r.diastolic_bp.map(|v| v as f32))
             .execute(&pool).await?;
+        if let Some(v) = r.rmssd {
+            crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "hrv".to_string(), v);
+        }
+        if let Some(v) = r.stress {
+            crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "stress".to_string(), v);
+        }
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "rejectedPlaceholder": rejected_placeholder, "type": "hrv" } })))
@@ -113,6 +121,7 @@ pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, ValidatedJson
     for r in &body.records {
         sqlx::query("INSERT INTO spo2 (user_id, timestamp, value) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "spo2".to_string(), r.value as f64);
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "spo2" } })))
@@ -138,6 +147,7 @@ pub async fn post_temperature(user: AuthUser, State(pool): State<PgPool>, Valida
     for r in &body.records {
         sqlx::query("INSERT INTO temperature (user_id, timestamp, value) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "temp".to_string(), r.value as f64);
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "temperature" } })))
@@ -181,39 +191,181 @@ pub async fn get_ppi(user: AuthUser, State(pool): State<PgPool>, Query(q): Query
 
 pub async fn post_ppi(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let rmssd = body.get("rmssd").and_then(|v| v.as_f64());
+    let coherence = body.get("coherence").and_then(|v| v.as_f64());
     sqlx::query("INSERT INTO ppi (user_id, timestamp, intervals, rmssd, coherence) VALUES ($1, NOW(), $2, $3, $4)")
         .bind(uid)
         .bind(body.get("intervals"))
-        .bind(body.get("rmssd").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("coherence").and_then(|v| v.as_f64()).map(|v| v as f32))
+        .bind(rmssd.map(|v| v as f32))
+        .bind(coherence.map(|v| v as f32))
         .execute(&pool).await?;
+    let ts = Utc::now();
+    if let Some(v) = coherence {
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, ts, "coherence".to_string(), v);
+    }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": 1, "type": "ppi" } })))
 }
 
 // ═══ ECG ═══
-pub async fn get_ecg(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
-    let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(default_to);
-    let rows = sqlx::query_as::<_, (uuid::Uuid, chrono::DateTime<Utc>, Option<i32>, Option<i32>, Option<serde_json::Value>)>(
-        "SELECT id, timestamp, duration_seconds, sample_rate, analysis FROM ecg WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 50"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    let data: Vec<serde_json::Value> = rows.into_iter().map(|r| serde_json::json!({
-        "id": r.0, "timestamp": r.1, "durationSeconds": r.2, "sampleRate": r.3, "analysis": r.4
-    })).collect();
-    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+//
+// Project F — ECG Rework. Two sources share this table: the JCV8 bracelet's
+// single-lead stream and Apple Watch imports via HKElectrocardiogram. No
+// UNIQUE(user_id, timestamp) constraint exists (Project D finding: client
+// timestamps are fuzzy; adding one mid-stream is risky) — dedup is achieved
+// on the read path with ORDER BY timestamp DESC + client-side id hashing.
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ECGSource { Bracelet, AppleWatch }
+
+impl ECGSource {
+    pub fn as_str(&self) -> &'static str {
+        match self { Self::Bracelet => "bracelet", Self::AppleWatch => "apple_watch" }
+    }
 }
 
-pub async fn post_ecg(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
+fn default_ecg_source() -> ECGSource { ECGSource::Bracelet }
+
+#[derive(Debug, Deserialize)]
+pub struct PostECGBody {
+    #[serde(default)]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(alias = "durationSeconds")]
+    pub duration_seconds: Option<i32>,
+    #[serde(alias = "sampleRate")]
+    pub sample_rate: Option<i32>,
+    pub samples: Option<serde_json::Value>,
+    pub analysis: Option<serde_json::Value>,
+    #[serde(default = "default_ecg_source")]
+    pub source: ECGSource,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetECGQuery {
+    pub period: Option<String>,
+    pub source: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+fn ecg_period_start(period: Option<&str>) -> DateTime<Utc> {
+    match period {
+        Some("30d") => Utc::now() - Duration::days(30),
+        Some("3m") | Some("90d") => Utc::now() - Duration::days(90),
+        Some("1y") | Some("365d") => Utc::now() - Duration::days(365),
+        _ => Utc::now() - Duration::days(7),
+    }
+}
+
+pub async fn get_ecg(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Query(q): Query<GetECGQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let from = q.from.unwrap_or_else(|| ecg_period_start(q.period.as_deref()));
+    let to = q.to.unwrap_or_else(default_to);
+    let source_filter = q.source.as_deref().unwrap_or("all").to_string();
+
+    let rows = sqlx::query_as::<_, (
+        uuid::Uuid,
+        chrono::DateTime<Utc>,
+        Option<i32>,
+        Option<i32>,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    )>(
+        "SELECT id, timestamp, duration_seconds, sample_rate, source, analysis_json, analysis
+         FROM ecg
+         WHERE user_id = $1
+           AND timestamp BETWEEN $2 AND $3
+           AND ($4 = 'all' OR source = $4)
+         ORDER BY timestamp DESC LIMIT 50"
+    )
+    .bind(uid).bind(from).bind(to).bind(&source_filter)
+    .fetch_all(&pool).await?;
+
+    let items: Vec<serde_json::Value> = rows.into_iter().map(|(id, ts, dur, sr, src, analysis_json, legacy)| {
+        // Prefer the structured analysis_json (Project F) and fall back to the
+        // legacy free-form `analysis` column so historical rows still render.
+        let analysis = analysis_json.or(legacy);
+        serde_json::json!({
+            "id": id,
+            "timestamp": ts,
+            "duration_seconds": dur,
+            "sample_rate": sr,
+            "source": src,
+            "analysis": analysis,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "success": true, "data": items })))
+}
+
+pub async fn post_ecg(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(body): Json<PostECGBody>,
+) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
     let id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO ecg (id, user_id, timestamp, duration_seconds, sample_rate, samples, analysis) VALUES ($1, $2, NOW(), $3, $4, $5, $6)")
-        .bind(id).bind(uid)
-        .bind(body.get("durationSeconds").and_then(|v| v.as_i64()).map(|v| v as i32))
-        .bind(body.get("sampleRate").and_then(|v| v.as_i64()).map(|v| v as i32))
-        .bind(body.get("samples"))
-        .bind(body.get("analysis"))
-        .execute(&pool).await?;
+    let ts = body.timestamp.unwrap_or_else(Utc::now);
+    sqlx::query(
+        "INSERT INTO ecg (id, user_id, timestamp, duration_seconds, sample_rate, samples, analysis, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+    )
+    .bind(id)
+    .bind(uid)
+    .bind(ts)
+    .bind(body.duration_seconds)
+    .bind(body.sample_rate)
+    .bind(body.samples)
+    .bind(body.analysis)
+    .bind(body.source.as_str())
+    .execute(&pool).await?;
     Ok(Json(serde_json::json!({ "success": true, "data": { "id": id, "type": "ecg" } })))
+}
+
+pub async fn get_ecg_by_id(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let row = sqlx::query_as::<_, (
+        chrono::DateTime<Utc>,
+        Option<i32>,
+        Option<i32>,
+        Option<serde_json::Value>,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    )>(
+        "SELECT timestamp, duration_seconds, sample_rate, samples, source, analysis_json, analysis
+         FROM ecg WHERE id = $1 AND user_id = $2"
+    )
+    .bind(id).bind(uid)
+    .fetch_optional(&pool).await?;
+
+    match row {
+        Some((ts, dur, sr, samples, src, analysis_json, legacy)) => {
+            let analysis = analysis_json.or(legacy);
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "id": id,
+                    "timestamp": ts,
+                    "duration_seconds": dur,
+                    "sample_rate": sr,
+                    "samples": samples,
+                    "source": src,
+                    "analysis": analysis,
+                }
+            })))
+        }
+        None => Err(AppError::NotFound(format!("ECG {} not found", id))),
+    }
 }
 
 // ═══ ACTIVITY ═══
@@ -237,52 +389,351 @@ pub async fn post_activity(user: AuthUser, State(pool): State<PgPool>, Validated
         .bind(body.mets.map(|v| v as f32))
         .bind(body.activity_type.as_deref())
         .execute(&pool).await?;
+    // Intraday: emit 1-min activity_intensity sample (MET proxy) + workout event if type known.
+    let ts = Utc::now();
+    if let Some(m) = body.mets {
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, ts, "activity_intensity".to_string(), m);
+    }
+    if let Some(kind) = body.activity_type.as_deref() {
+        let meta = serde_json::json!({
+            "kind": kind,
+            "active_minutes": body.active_minutes,
+            "calories": body.calories,
+            "mets": body.mets,
+        });
+        crate::intraday::ingest::spawn_write_event(pool.clone(), uid, ts, "workout".to_string(), meta);
+    }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": 1, "type": "activity" } })))
 }
 
 // ═══ DERIVED METRICS ═══
-pub async fn get_blood_pressure(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
-    let from = q.from.unwrap_or_else(default_from);
-    let to = q.to.unwrap_or_else(default_to);
-    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<f32>, Option<f32>)>(
-        "SELECT timestamp, systolic_bp, diastolic_bp FROM hrv WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND systolic_bp IS NOT NULL AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 500"
-    ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
-    let data: Vec<serde_json::Value> = rows.into_iter().map(|r| serde_json::json!({ "timestamp": r.0, "systolic": r.1, "diastolic": r.2 })).collect();
-    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+
+/// Source of a BP reading. `manual` = user-typed in the sheet, `healthkit` =
+/// imported from Apple Health (cuff / watch / 3rd-party device), `estimated` =
+/// server-side derivation from HR+HRV used as read-through fallback only.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BPSource { Manual, HealthKit, Estimated }
+
+impl BPSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::HealthKit => "healthkit",
+            Self::Estimated => "estimated",
+        }
+    }
 }
 
-/// POST /api/v1/biometrics/blood-pressure — bracelet-sourced BP readings.
-/// Accepts `{ records: [{ timestamp, systolic, diastolic }] }`. BP is stored
-/// in the existing `hrv` table's `systolic_bp`/`diastolic_bp` columns (see
-/// `get_blood_pressure` for the read path) so we don't need a new table.
-pub async fn post_blood_pressure(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
-    let uid = get_user_uuid(&pool, &user.privy_did).await?;
-    let records = body.get("records").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let mut count = 0i64;
+fn default_bp_source() -> BPSource { BPSource::Manual }
+
+#[derive(Debug, Deserialize)]
+pub struct PostBPRecord {
+    pub timestamp: Option<DateTime<Utc>>,
+    pub systolic: i32,
+    pub diastolic: i32,
+    #[serde(default = "default_bp_source")]
+    pub source: BPSource,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PostBPBody { pub records: Vec<PostBPRecord> }
+
+#[derive(Debug, Deserialize)]
+pub struct GetBPQuery {
+    pub period: Option<String>, // "7d"|"30d"|"3m"|"1y"
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BPReading {
+    pub timestamp: DateTime<Utc>,
+    pub systolic: i32,
+    pub diastolic: i32,
+    pub source: String,
+    pub age_sec: Option<i64>,
+    pub tier: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BPResult {
+    pub current: Option<BPReading>,
+    pub history: Vec<BPReading>,
+    pub estimated_fallback: bool,
+}
+
+/// AHA 2017 clinical BP categories.
+pub fn classify_tier(s: i32, d: i32) -> &'static str {
+    if s >= 180 || d >= 120 { "crisis" }
+    else if s >= 140 || d >= 90 { "stage2" }
+    else if s >= 130 || d >= 80 { "stage1" }
+    else if s >= 120 && d < 80  { "elevated" }
+    else { "normal" }
+}
+
+/// Read-through estimate used only when no fresh manual/healthkit reading is
+/// available. Never written to the DB — see `post_blood_pressure`. Formula is
+/// the existing v1: 112/70 baseline + age/HR/HRV corrections. Bounded so a
+/// degenerate HR/HRV combo can't produce impossible values.
+pub fn estimate_bp(hr: f64, hrv: f64, age: i32) -> (i32, i32) {
+    let baseline_s = 112.0;
+    let baseline_d = 70.0;
+    let age_correction = (age as f64 - 30.0) * 0.3;
+    let hr_dev = (hr - 65.0) * 0.2;
+    let hrv_correction = (50.0 - hrv) * 0.05;
+    let s = (baseline_s + age_correction + hr_dev + hrv_correction).round() as i32;
+    let d = (baseline_d + age_correction * 0.5 + hr_dev * 0.6).round() as i32;
+    (s.clamp(80, 200), d.clamp(50, 130))
+}
+
+pub async fn get_blood_pressure(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Query(q): Query<GetBPQuery>,
+) -> AppResult<Json<BPResult>> {
+    let user_id = crate::users::resolve_user_id(&pool, &user.privy_did).await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let period_start = match q.period.as_deref() {
+        Some("30d") => Utc::now() - Duration::days(30),
+        Some("3m")  => Utc::now() - Duration::days(90),
+        Some("1y")  => Utc::now() - Duration::days(365),
+        _           => q.from.unwrap_or_else(|| Utc::now() - Duration::days(7)),
+    };
+
+    // Priority lookup for "current": manual > healthkit. Estimated rows live
+    // outside the partial index — this query never touches them.
+    let current_row: Option<(DateTime<Utc>, f32, f32, String)> = sqlx::query_as(
+        "SELECT timestamp, systolic_bp::real, diastolic_bp::real, bp_source
+         FROM hrv
+         WHERE user_id=$1 AND bp_source IN ('manual','healthkit')
+           AND systolic_bp IS NOT NULL AND diastolic_bp IS NOT NULL
+         ORDER BY
+           CASE bp_source WHEN 'manual' THEN 0 WHEN 'healthkit' THEN 1 END,
+           timestamp DESC
+         LIMIT 1"
+    ).bind(user_id).fetch_optional(&pool).await?;
+
+    let now = Utc::now();
+    let (current_reading, estimated_fallback) = match current_row {
+        Some((ts, s, d, src)) if now - ts < Duration::hours(6) => {
+            let s_i = s.round() as i32;
+            let d_i = d.round() as i32;
+            (Some(BPReading {
+                timestamp: ts,
+                systolic: s_i,
+                diastolic: d_i,
+                source: src,
+                age_sec: Some((now - ts).num_seconds()),
+                tier: classify_tier(s_i, d_i).to_string(),
+            }), false)
+        }
+        _ => {
+            // Fallback: derive from latest HR/HRV + user age. Absence of either
+            // → current stays None and the UI shows the "no data" empty state.
+            let latest: Option<(DateTime<Utc>, Option<f32>, Option<f32>, Option<i32>)> = sqlx::query_as(
+                "SELECT h.timestamp, h.heart_rate, h.rmssd, u.age
+                 FROM hrv h JOIN users u ON u.id = h.user_id
+                 WHERE h.user_id=$1 AND h.heart_rate IS NOT NULL
+                 ORDER BY h.timestamp DESC LIMIT 1"
+            ).bind(user_id).fetch_optional(&pool).await?;
+            let reading = latest.and_then(|(ts, hr_opt, hrv_opt, age_opt)| {
+                hr_opt.map(|hr| {
+                    let (s, d) = estimate_bp(
+                        hr as f64,
+                        hrv_opt.unwrap_or(50.0) as f64,
+                        age_opt.unwrap_or(30),
+                    );
+                    BPReading {
+                        timestamp: ts,
+                        systolic: s,
+                        diastolic: d,
+                        source: "estimated".to_string(),
+                        age_sec: Some((now - ts).num_seconds()),
+                        tier: classify_tier(s, d).to_string(),
+                    }
+                })
+            });
+            (reading, true)
+        }
+    };
+
+    // History is manual+healthkit only — estimated is a read-through synth,
+    // not a record, so it never appears here.
+    let history_rows: Vec<(DateTime<Utc>, f32, f32, String)> = sqlx::query_as(
+        "SELECT timestamp, systolic_bp::real, diastolic_bp::real, bp_source FROM hrv
+         WHERE user_id=$1 AND bp_source IN ('manual','healthkit')
+           AND timestamp >= $2
+           AND systolic_bp IS NOT NULL AND diastolic_bp IS NOT NULL
+         ORDER BY timestamp DESC
+         LIMIT 500"
+    ).bind(user_id).bind(period_start).fetch_all(&pool).await?;
+
+    let history: Vec<BPReading> = history_rows.into_iter().map(|(ts, s, d, src)| {
+        let s_i = s.round() as i32;
+        let d_i = d.round() as i32;
+        BPReading {
+            timestamp: ts,
+            systolic: s_i,
+            diastolic: d_i,
+            source: src,
+            age_sec: Some((now - ts).num_seconds()),
+            tier: classify_tier(s_i, d_i).to_string(),
+        }
+    }).collect();
+
+    Ok(Json(BPResult { current: current_reading, history, estimated_fallback }))
+}
+
+/// POST /api/v1/biometrics/blood-pressure — multi-source BP ingest.
+///
+/// Accepts `{ records: [{ timestamp, systolic, diastolic, source }] }` with
+/// `source ∈ {manual, healthkit}` (defaults to `manual`). `estimated` payloads
+/// from the client are ignored silently — estimated is a GET-only synth.
+/// Writes land in the existing `hrv` table (systolic_bp/diastolic_bp columns)
+/// alongside the new `bp_source` column introduced by migration 010.
+pub async fn post_blood_pressure(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(body): Json<PostBPBody>,
+) -> AppResult<Json<serde_json::Value>> {
+    let uid = crate::users::resolve_user_id(&pool, &user.privy_did).await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let mut inserted = 0i64;
     let mut rejected = 0i64;
-    for r in &records {
-        let sys = r.get("systolic").and_then(|v| v.as_f64()).map(|v| v as f32);
-        let dia = r.get("diastolic").and_then(|v| v.as_f64()).map(|v| v as f32);
-        // Physiological BP bounds — reject anything absurd to protect the DB.
-        let sys_ok = sys.map(|v| (70.0..=220.0).contains(&v)).unwrap_or(false);
-        let dia_ok = dia.map(|v| (40.0..=140.0).contains(&v)).unwrap_or(false);
-        let pair_ok = sys.zip(dia).map(|(s, d)| s > d).unwrap_or(false);
-        if !(sys_ok && dia_ok && pair_ok) {
+    let mut crisis_detected: Option<(i32, i32, DateTime<Utc>)> = None;
+
+    for rec in body.records {
+        // Physiological bounds + sys>dia sanity. Matches BPManualEntrySheet's
+        // client-side ranges so we don't silently diverge.
+        if !(70..=250).contains(&rec.systolic)
+            || !(40..=150).contains(&rec.diastolic)
+            || rec.systolic <= rec.diastolic
+        {
             rejected += 1;
             continue;
         }
-        let ts = r.get("timestamp").and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
-            .unwrap_or_else(Utc::now);
-        sqlx::query("INSERT INTO hrv (user_id, timestamp, systolic_bp, diastolic_bp) VALUES ($1, $2, $3, $4)")
-            .bind(uid).bind(ts).bind(sys).bind(dia)
-            .execute(&pool).await?;
-        count += 1;
+        // Estimated readings are server-side derived at read time only. A
+        // client shouldn't try to post them; if it does, we drop them.
+        if matches!(rec.source, BPSource::Estimated) {
+            rejected += 1;
+            continue;
+        }
+
+        let ts = rec.timestamp.unwrap_or_else(Utc::now);
+        let src = rec.source.as_str();
+
+        // hrv has no unique (user_id, timestamp) constraint — can't ON CONFLICT.
+        // Source priority (manual > healthkit > estimated) is enforced at GET
+        // time via ORDER BY on bp_source, not at write time.
+        sqlx::query(
+            "INSERT INTO hrv (user_id, timestamp, systolic_bp, diastolic_bp, bp_source)
+             VALUES ($1, $2, $3, $4, $5)"
+        )
+        .bind(uid)
+        .bind(ts)
+        .bind(rec.systolic as f32)
+        .bind(rec.diastolic as f32)
+        .bind(src)
+        .execute(&pool).await?;
+        inserted += 1;
+
+        // Track worst crisis observed in this batch so we dispatch at most one
+        // push per request.
+        if rec.systolic >= 180 || rec.diastolic >= 120 {
+            crisis_detected = Some((rec.systolic, rec.diastolic, ts));
+        }
+
+        // Intraday hook (Project A): write one 1-min sample per BP component
+        // so the detail screen chart picks them up on the next fetch.
+        crate::intraday::ingest::spawn_write_1min(
+            pool.clone(), uid, ts, "systolic_bp".to_string(), rec.systolic as f64
+        );
+        crate::intraday::ingest::spawn_write_1min(
+            pool.clone(), uid, ts, "diastolic_bp".to_string(), rec.diastolic as f64
+        );
     }
+
+    // Crisis push is fire-and-forget — the response to the client must not
+    // wait on APNs round-trip latency.
+    if let Some((s, d, _)) = crisis_detected {
+        let pool_c = pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dispatch_bp_crisis(&pool_c, uid, s, d).await {
+                tracing::error!(?e, "bp_crisis dispatch failed");
+            }
+        });
+    }
+
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": { "recordsSaved": count, "rejected": rejected, "type": "blood_pressure" }
+        "data": {
+            "recordsSaved": inserted,
+            "rejected": rejected,
+            "type": "blood_pressure",
+        }
     })))
+}
+
+/// Dispatch a BP crisis push if we haven't sent one in the last 4h. Uses
+/// `push_notifications_log` as a lightweight dedup store and the existing
+/// `ApnsClient::send_alert` path (no new APNs abstraction invented).
+async fn dispatch_bp_crisis(
+    pool: &PgPool,
+    user_id: uuid::Uuid,
+    systolic: i32,
+    diastolic: i32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 4h dedup window — stops us paging a user every minute while their
+    // bracelet streams identical readings.
+    let last: Option<(DateTime<Utc>,)> = sqlx::query_as(
+        "SELECT sent_at FROM push_notifications_log
+         WHERE user_id=$1 AND category='bp_crisis'
+         ORDER BY sent_at DESC LIMIT 1"
+    ).bind(user_id).fetch_optional(pool).await?;
+    if let Some((last_ts,)) = last {
+        if Utc::now() - last_ts < Duration::hours(4) {
+            tracing::info!(?user_id, "bp_crisis dedup: last push <4h ago");
+            return Ok(());
+        }
+    }
+
+    let title = format!("⚠️ Критическое давление {}/{}", systolic, diastolic);
+    let body = "Серьёзные показатели давления — обратись к врачу".to_string();
+
+    // Fetch all active push tokens for this user.
+    let tokens: Vec<String> = sqlx::query_scalar(
+        "SELECT token FROM push_tokens WHERE user_id=$1"
+    ).bind(user_id).fetch_all(pool).await.unwrap_or_default();
+
+    if tokens.is_empty() {
+        tracing::info!(?user_id, "bp_crisis: no push tokens — skip");
+        return Ok(());
+    }
+
+    // One-shot APNs client for this dispatch. Reusing the scheduler's client
+    // would require piping it in as state; for a fire-and-forget path we
+    // construct locally — the ApnsConfig::from_env() inside is cheap and the
+    // JWT cache is per-client but only re-built every 50min anyway.
+    let apns = crate::push::apns::ApnsClient::new();
+    let deeplink = "wellex://body/bp";
+    let mut sent = 0;
+    for token in &tokens {
+        match apns.send_alert(token, &title, &body, Some(deeplink)).await {
+            Ok(()) => sent += 1,
+            Err(e) => tracing::warn!(?user_id, "apns send failed: {e}"),
+        }
+    }
+
+    if sent > 0 {
+        sqlx::query(
+            "INSERT INTO push_notifications_log (user_id, category) VALUES ($1, 'bp_crisis')"
+        ).bind(user_id).execute(pool).await?;
+    }
+
+    Ok(())
 }
 
 pub async fn get_stress(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<TimeRangeQuery>) -> AppResult<Json<serde_json::Value>> {
@@ -986,4 +1437,81 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
         "success": true,
         "data": { "syncId": uuid::Uuid::new_v4(), "recordsReceived": received, "recordsProcessed": processed, "deviceId": body.device_id }
     })))
+}
+
+// ═══ BP UNIT TESTS ═══
+// Pure-function coverage for tier classification and the read-through estimate.
+// Integration tests that hit Postgres live in `tests/` and require a live DB.
+#[cfg(test)]
+mod bp_tests {
+    use super::*;
+
+    #[test]
+    fn bp_tier_normal() {
+        assert_eq!(classify_tier(115, 75), "normal");
+        assert_eq!(classify_tier(119, 79), "normal");
+    }
+
+    #[test]
+    fn bp_tier_elevated() {
+        assert_eq!(classify_tier(125, 75), "elevated");
+        assert_eq!(classify_tier(129, 79), "elevated");
+    }
+
+    #[test]
+    fn bp_tier_stage1() {
+        assert_eq!(classify_tier(135, 85), "stage1");
+        assert_eq!(classify_tier(130, 80), "stage1");
+        // High diastolic alone trips stage1
+        assert_eq!(classify_tier(118, 82), "stage1");
+    }
+
+    #[test]
+    fn bp_tier_stage2() {
+        assert_eq!(classify_tier(145, 95), "stage2");
+        assert_eq!(classify_tier(140, 90), "stage2");
+        assert_eq!(classify_tier(118, 95), "stage2");
+    }
+
+    #[test]
+    fn bp_tier_crisis() {
+        assert_eq!(classify_tier(185, 125), "crisis");
+        assert_eq!(classify_tier(180, 90), "crisis");
+        assert_eq!(classify_tier(140, 120), "crisis");
+    }
+
+    #[test]
+    fn bp_estimate_baseline_30yo() {
+        let (s, d) = estimate_bp(65.0, 50.0, 30);
+        assert!((110..=114).contains(&s), "expected ~112, got {s}");
+        assert!((68..=72).contains(&d), "expected ~70, got {d}");
+    }
+
+    #[test]
+    fn bp_estimate_high_hr_low_hrv_raises_sys() {
+        let (baseline_s, _) = estimate_bp(65.0, 50.0, 30);
+        let (high_s, _) = estimate_bp(100.0, 20.0, 30);
+        assert!(high_s > baseline_s, "high HR + low HRV should raise sys ({high_s} vs {baseline_s})");
+    }
+
+    #[test]
+    fn bp_estimate_clamped_within_bounds() {
+        let (s_lo, d_lo) = estimate_bp(0.0, 200.0, 18);
+        let (s_hi, d_hi) = estimate_bp(250.0, 0.0, 90);
+        assert!((80..=200).contains(&s_lo));
+        assert!((50..=130).contains(&d_lo));
+        assert!((80..=200).contains(&s_hi));
+        assert!((50..=130).contains(&d_hi));
+    }
+
+    #[test]
+    fn bp_source_serde_lowercase() {
+        assert_eq!(BPSource::Manual.as_str(), "manual");
+        assert_eq!(BPSource::HealthKit.as_str(), "healthkit");
+        assert_eq!(BPSource::Estimated.as_str(), "estimated");
+        let json = serde_json::to_string(&BPSource::HealthKit).unwrap();
+        assert_eq!(json, "\"healthkit\"");
+        let back: BPSource = serde_json::from_str("\"manual\"").unwrap();
+        assert_eq!(back, BPSource::Manual);
+    }
 }

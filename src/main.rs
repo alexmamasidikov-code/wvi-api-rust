@@ -25,6 +25,12 @@ mod family;
 mod audit;
 mod events;
 mod push;
+mod intraday;
+mod alarms;
+mod reminders;
+mod sensitivity;
+mod stress;
+mod narrator_schedule;
 
 use cache::AppCache;
 use metrics::{spawn_pool_sampler, track_request, Metrics};
@@ -146,6 +152,24 @@ async fn async_main() {
     let apns = push::apns::ApnsClient::new();
     push::scheduler::spawn_scheduler(pool.clone(), app_cache.clone(), apns.clone());
 
+    // Intraday 5-min downsampler + hourly rollup worker.
+    intraday::worker::spawn(pool.clone());
+
+    // Proactive reminders evaluator (Project E) — tick every 5 min, dispatches
+    // APNs pushes for the six reminder types when biometric gates + windows
+    // + master switch align. No-op if no users have master enabled.
+    reminders::evaluator::spawn(pool.clone(), apns.clone());
+
+    // Sensitivity — daily morning/evening AI narrators (Project B). Hourly
+    // tick, per-user TZ deferred to Project C.
+    sensitivity::narrator::spawn_daily_crons(pool.clone());
+
+    // Project C — emotion + stress inference workers + emotion daily crons.
+    emotions::v2::inference::spawn_worker(pool.clone());
+    emotions::v2::narrator::spawn_daily_crons(pool.clone());
+    stress::v2::inference::spawn_worker(pool.clone());
+    stress::v2::micro_pulse::spawn_worker(pool.clone());
+
     // Metrics collector + periodic DB pool sampler (updates gauges every 5 s).
     let app_metrics = Metrics::new();
     spawn_pool_sampler(pool.clone(), app_metrics.clone());
@@ -226,6 +250,7 @@ async fn async_main() {
         .route("/api/v1/biometrics/sleep", get(biometrics::handlers::get_sleep).post(biometrics::handlers::post_sleep))
         .route("/api/v1/biometrics/ppi", get(biometrics::handlers::get_ppi).post(biometrics::handlers::post_ppi))
         .route("/api/v1/biometrics/ecg", get(biometrics::handlers::get_ecg).post(biometrics::handlers::post_ecg))
+        .route("/api/v1/biometrics/ecg/{id}", get(biometrics::handlers::get_ecg_by_id))
         .route("/api/v1/biometrics/activity", get(biometrics::handlers::get_activity).post(biometrics::handlers::post_activity))
         .route("/api/v1/biometrics/blood-pressure", get(biometrics::handlers::get_blood_pressure).post(biometrics::handlers::post_blood_pressure))
         .route("/api/v1/biometrics/stress", get(biometrics::handlers::get_stress))
@@ -248,6 +273,12 @@ async fn async_main() {
         .route("/api/v1/wvi/breakdown", get(wvi::handlers::breakdown))
         .route("/api/v1/wvi/compare", get(wvi::handlers::compare))
 
+        // ═══ WVI v3 (Project C — 18-component personalized) ═══
+        .route("/api/v1/wvi/v3/current", get(wvi::v3::handlers::get_current))
+        .route("/api/v1/wvi/v3/forecast", get(wvi::v3::handlers::get_forecast))
+        .route("/api/v1/wvi/profile", axum::routing::put(wvi::v3::handlers::put_profile))
+        .route("/api/v1/wvi/profile-suggest", get(wvi::v3::handlers::get_profile_suggest))
+
         // ═══ EMOTIONS (8) ═══
         .route("/api/v1/emotions/current", get(emotions::handlers::get_current))
         .route("/api/v1/emotions/history", get(emotions::handlers::get_history))
@@ -257,6 +288,12 @@ async fn async_main() {
         .route("/api/v1/emotions/transitions", get(emotions::handlers::get_transitions))
         .route("/api/v1/emotions/triggers", get(emotions::handlers::get_triggers))
         .route("/api/v1/emotions/streaks", get(emotions::handlers::get_streaks))
+
+        // ═══ EMOTIONS v2 (Project C — 1-min 18-label triplet + metrics + narrator) ═══
+        .route("/api/v1/emotions/v2/intraday", get(emotions::v2::handlers::get_intraday))
+        .route("/api/v1/emotions/v2/metrics", get(emotions::v2::handlers::get_metrics))
+        .route("/api/v1/emotions/v2/narrative", get(emotions::v2::handlers::get_narrative))
+        .route("/api/v1/emotions/v2/triggers", get(emotions::v2::handlers::get_triggers))
 
         // ═══ ACTIVITIES (10) ═══
         .route("/api/v1/activities/current", get(activities::handlers::get_current))
@@ -350,6 +387,36 @@ async fn async_main() {
 
         // ═══ PUSH (APNs) ═══
         .route("/api/v1/notifications/register", post(push::handlers::register_token))
+
+        // ═══ INTRADAY (time-series + backfill) ═══
+        .route("/api/v1/intraday", get(intraday::handlers::get_intraday))
+        .route("/api/v1/intraday/backfill", post(intraday::handlers::post_backfill))
+
+        // ═══ ALARMS (Project E — app-authoritative + Rust backup) ═══
+        .route("/api/v1/alarms/list", get(alarms::handlers::list_alarms))
+        .route("/api/v1/alarms/sync", post(alarms::handlers::sync_alarms))
+        .route("/api/v1/alarms/{id}", axum::routing::delete(alarms::handlers::delete_alarm))
+
+        // ═══ REMINDERS (Project E — 6 proactive reminder types) ═══
+        .route(
+            "/api/v1/reminders/settings",
+            get(reminders::handlers::get_settings).put(reminders::handlers::put_settings),
+        )
+
+        // ═══ STRESS v2 (Project C — 1-min score + 5-level + micro-pulse) ═══
+        .route("/api/v1/stress/v2/intraday", get(stress::v2::handlers::get_intraday))
+
+        // ═══ SENSITIVITY (Project B — signals + baselines + contextual AI) ═══
+        .route("/api/v1/signals", get(sensitivity::handlers::get_signals))
+        .route(
+            "/api/v1/signals/{id}/ack",
+            axum::routing::put(sensitivity::handlers::ack_signal),
+        )
+        .route(
+            "/api/v1/insights/contextual",
+            get(sensitivity::handlers::get_contextual),
+        )
+        .route("/api/v1/baselines", get(sensitivity::handlers::get_baseline))
 
         // ═══ AUDIT (1) ═══
         .route("/api/v1/audit/log", get(audit::get_audit_log))

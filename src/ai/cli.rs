@@ -203,6 +203,76 @@ pub async fn invoke_claude_cli(prompt: &str) -> Result<String, String> {
     Ok(text)
 }
 
+/// Variant of `invoke_claude_cli` used by the ECG-interpret strict-JSON path.
+/// The base CLI implementation doesn't expose a temperature knob because the
+/// `claude` binary takes `--print` without one, but we still parametrise the
+/// call with a `retry_hint` that gets appended to the prompt so the
+/// higher-retry invocation explicitly asks for JSON-only output again.
+pub async fn invoke_claude_cli_retry(prompt: &str, retry_hint: &str) -> Result<String, String> {
+    let full = if retry_hint.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}\n\n{retry_hint}")
+    };
+    invoke_claude_cli(&full).await
+}
+
+/// Strict-JSON ECG prompt — Project F.
+///
+/// Output a single JSON object matching the schema below. Any deviation
+/// (markdown fences, prose, additional fields) is considered a parse
+/// failure and triggers a retry path in the handler.
+pub fn ecg_interpret_prompt(samples: &[f64], duration_seconds: i32, sample_rate: i32) -> String {
+    // Clip the in-prompt sample list to the first 200 values; the full
+    // waveform is persisted in the DB, but streaming 3750+ floats into the
+    // prompt eats the context window for zero added signal (Claude cannot
+    // numerically process 30s of ECG — it reasons off summary stats that we
+    // include in the text).
+    let n = samples.len();
+    let preview = if n > 200 {
+        format!("[{n} samples, first 200 shown: {:?}]", &samples[..200])
+    } else {
+        format!("{:?}", samples)
+    };
+
+    format!(
+        r#"You are a single-lead ECG analysis assistant. Interpret the waveform below.
+
+Samples ({duration_seconds} sec @ {sample_rate} Hz, n={n}): {preview}
+
+STRICT OUTPUT FORMAT — respond with ONE valid JSON object and nothing else.
+No markdown fences. No commentary. No field rename. No extra fields.
+
+Schema:
+{{
+  "metrics": {{
+    "hr_mean": <int bpm>,
+    "hr_min": <int>,
+    "hr_max": <int>,
+    "rr_sd_ms": <number>,
+    "qrs_duration_ms": <int or null>
+  }},
+  "rhythm": "sinus" | "irregular" | "brady" | "tachy",
+  "afib_score": <float 0..1>,
+  "observations": [<string, English, max 4 bullets>],
+  "recommendation": <string, Russian, 1-2 sentences>,
+  "is_crisis": <bool>
+}}
+
+Clinical rules:
+- rhythm is 'brady' when hr_mean<50, 'tachy' when hr_mean>100, 'irregular'
+  when afib_score>0.5, otherwise 'sinus'.
+- is_crisis MUST be true when hr_mean>150 OR hr_mean<40 OR afib_score>0.8.
+- recommendation: 1-2 short sentences, Russian. Do NOT claim a medical
+  diagnosis. If the reading is abnormal, include the phrase
+  "не заменяет консультацию врача".
+- Do NOT attempt ST-segment, axis, or P-wave analysis — a single-lead
+  wrist signal cannot support those.
+
+Output the JSON object now:"#
+    )
+}
+
 /// Cheap non-cryptographic 64-bit hash of the prompt body. Used only as a
 /// span attribute so traces can be correlated across retries without leaking
 /// the full prompt text into the observability backend.
