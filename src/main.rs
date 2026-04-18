@@ -265,6 +265,12 @@ async fn async_main() {
         .route("/api/v1/wvi/breakdown", get(wvi::handlers::breakdown))
         .route("/api/v1/wvi/compare", get(wvi::handlers::compare))
 
+        // ═══ WVI v3 (Project C — 18-component personalized) ═══
+        .route("/api/v1/wvi/v3/current", get(wvi::v3::handlers::get_current))
+        .route("/api/v1/wvi/v3/forecast", get(wvi::v3::handlers::get_forecast))
+        .route("/api/v1/wvi/profile", axum::routing::put(wvi::v3::handlers::put_profile))
+        .route("/api/v1/wvi/profile-suggest", get(wvi::v3::handlers::get_profile_suggest))
+
         // ═══ EMOTIONS (8) ═══
         .route("/api/v1/emotions/current", get(emotions::handlers::get_current))
         .route("/api/v1/emotions/history", get(emotions::handlers::get_history))
