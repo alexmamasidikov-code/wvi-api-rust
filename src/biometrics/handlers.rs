@@ -47,6 +47,7 @@ pub async fn post_heart_rate(user: AuthUser, State(pool): State<PgPool>, Validat
         sqlx::query("INSERT INTO heart_rate (user_id, timestamp, bpm) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32)
             .execute(&pool).await?;
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "hr".to_string(), r.value as f64);
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "heart_rate" } })))
@@ -88,6 +89,12 @@ pub async fn post_hrv(user: AuthUser, State(pool): State<PgPool>, ValidatedJson(
             .bind(r.systolic_bp.map(|v| v as f32))
             .bind(r.diastolic_bp.map(|v| v as f32))
             .execute(&pool).await?;
+        if let Some(v) = r.rmssd {
+            crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "hrv".to_string(), v);
+        }
+        if let Some(v) = r.stress {
+            crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "stress".to_string(), v);
+        }
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "rejectedPlaceholder": rejected_placeholder, "type": "hrv" } })))
@@ -113,6 +120,7 @@ pub async fn post_spo2(user: AuthUser, State(pool): State<PgPool>, ValidatedJson
     for r in &body.records {
         sqlx::query("INSERT INTO spo2 (user_id, timestamp, value) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "spo2".to_string(), r.value as f64);
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "spo2" } })))
@@ -138,6 +146,7 @@ pub async fn post_temperature(user: AuthUser, State(pool): State<PgPool>, Valida
     for r in &body.records {
         sqlx::query("INSERT INTO temperature (user_id, timestamp, value) VALUES ($1, $2, $3)")
             .bind(uid).bind(r.timestamp).bind(r.value as f32).execute(&pool).await?;
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, r.timestamp, "temp".to_string(), r.value as f64);
         count += 1;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": count, "type": "temperature" } })))
@@ -181,12 +190,18 @@ pub async fn get_ppi(user: AuthUser, State(pool): State<PgPool>, Query(q): Query
 
 pub async fn post_ppi(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let rmssd = body.get("rmssd").and_then(|v| v.as_f64());
+    let coherence = body.get("coherence").and_then(|v| v.as_f64());
     sqlx::query("INSERT INTO ppi (user_id, timestamp, intervals, rmssd, coherence) VALUES ($1, NOW(), $2, $3, $4)")
         .bind(uid)
         .bind(body.get("intervals"))
-        .bind(body.get("rmssd").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("coherence").and_then(|v| v.as_f64()).map(|v| v as f32))
+        .bind(rmssd.map(|v| v as f32))
+        .bind(coherence.map(|v| v as f32))
         .execute(&pool).await?;
+    let ts = Utc::now();
+    if let Some(v) = coherence {
+        crate::intraday::ingest::spawn_write_1min(pool.clone(), uid, ts, "coherence".to_string(), v);
+    }
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": 1, "type": "ppi" } })))
 }
 
