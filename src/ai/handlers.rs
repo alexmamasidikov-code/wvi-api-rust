@@ -1,9 +1,15 @@
-use axum::{extract::State, Extension, Json};
+use axum::{
+    extract::State,
+    response::sse::{Event, KeepAlive, Sse},
+    Extension, Json,
+};
+use futures::stream::StreamExt;
 use sqlx::PgPool;
+use std::convert::Infallible;
 use crate::auth::middleware::AuthUser;
 use crate::cache::AppCache;
 use crate::error::AppResult;
-use super::cli::{ask_or_fallback, AiEndpointKind};
+use super::cli::{ask_or_fallback, invoke_claude_cli_streaming, AiEndpointKind};
 use super::context_builder::build_full_context;
 use super::prompt_rules::WELLEX_SYSTEM_PROMPT;
 
@@ -264,6 +270,59 @@ pub async fn chat(
     );
     let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Chat, &prompt).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
+}
+
+/// Streaming variant of `chat`. Yields SSE `data:` frames with the text
+/// delta as the Claude CLI emits it, so iOS can render token-by-token
+/// instead of blocking for 20-30 s. Falls back to a single synthesised
+/// frame with the static fallback text if streaming produces nothing
+/// within the CLI timeout (e.g. CLI missing on the VPS).
+///
+/// Frame shape: `data: {"delta": "..."}\n\n` per delta,
+/// terminated by `data: [DONE]\n\n`.
+pub async fn chat_stream(
+    user: AuthUser,
+    State(pool): State<PgPool>,
+    Json(body): Json<serde_json::Value>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let user_message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tell me about my health.")
+        .to_string();
+
+    // Assemble the same biometric-aware prompt as the non-streaming path
+    // so answers stay consistent. The system prompt is prepended inline
+    // because the CLI streaming invoke doesn't re-read WELLEX_SYSTEM_PROMPT
+    // through cached_call.
+    let ctx = build_full_context(&pool, &user.privy_did).await;
+    let prompt = format!(
+        "{}\n\n{}\n\nThe user asks: \"{}\"\n\nAnswer using the biometric context above to give a personalized, helpful response.",
+        WELLEX_SYSTEM_PROMPT, ctx, user_message
+    );
+
+    let privy_did = user.privy_did.clone();
+    let stream = async_stream::stream! {
+        let mut delivered_any = false;
+        let mut inner = Box::pin(invoke_claude_cli_streaming(&prompt));
+        while let Some(chunk) = inner.next().await {
+            delivered_any = true;
+            let payload = serde_json::json!({ "delta": chunk }).to_string();
+            yield Ok::<_, Infallible>(Event::default().data(payload));
+        }
+        // If the CLI yielded nothing (missing, timeout, error), hand
+        // the caller the static fallback in one frame so the UI isn't
+        // left blank.
+        if !delivered_any {
+            let fallback = AiEndpointKind::Chat.fallback_text();
+            tracing::warn!(user = %privy_did, "chat_stream produced no chunks; sending fallback");
+            let payload = serde_json::json!({ "delta": fallback }).to_string();
+            yield Ok::<_, Infallible>(Event::default().data(payload));
+        }
+        yield Ok::<_, Infallible>(Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 pub async fn explain_metric(

@@ -15,11 +15,13 @@
 //!   so iOS never sees an error message to the end-user.
 
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
+use tokio_stream::wrappers::ReceiverStream;
 
+use futures::Stream;
 use once_cell::sync::Lazy;
 
 /// Max concurrent Claude CLI subprocesses. Protects the VPS from OOM.
@@ -207,6 +209,127 @@ pub async fn invoke_claude_cli(prompt: &str) -> Result<String, String> {
     }
 
     Ok(text)
+}
+
+/// Streaming invocation — spawns `claude --print --output-format stream-json
+/// --include-partial-messages`, reads NDJSON frames off stdout, and yields
+/// text deltas on a tokio channel wrapped as a Stream.
+///
+/// Each stream-json frame looks like (simplified):
+///   {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}
+/// We extract the `delta.text` field and push it. Frames of other types
+/// (message_start, message_stop, tool_use, etc.) are ignored — iOS only
+/// needs the text stream for chat UX.
+///
+/// On CLI failure or non-zero exit, the channel closes and the stream
+/// terminates. Caller is expected to append a fallback if the accumulated
+/// text is empty.
+pub fn invoke_claude_cli_streaming(prompt: &str) -> impl Stream<Item = String> {
+    let (tx, rx) = mpsc::channel::<String>(64);
+    let prompt = prompt.to_string();
+
+    tokio::spawn(async move {
+        let _permit = match CLI_SEMAPHORE.acquire().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let model = std::env::var("WVI_CLAUDE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
+        let mut cmd = Command::new("claude");
+        cmd.arg("--print");
+        cmd.arg("--model");
+        cmd.arg(&model);
+        cmd.arg("--output-format");
+        cmd.arg("stream-json");
+        cmd.arg("--include-partial-messages");
+        cmd.arg("--verbose");
+        cmd.kill_on_drop(true);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("claude streaming spawn failed: {e}");
+                return;
+            }
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        }
+
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let deadline = tokio::time::sleep(CLI_TIMEOUT);
+        tokio::pin!(deadline);
+
+        let mut reader = BufReader::new(stdout).lines();
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    tracing::warn!("claude streaming timed out after 90s");
+                    let _ = child.kill().await;
+                    break;
+                }
+                line = reader.next_line() => {
+                    match line {
+                        Ok(Some(raw)) => {
+                            if let Some(delta) = extract_text_delta(&raw) {
+                                if !delta.is_empty() && tx.send(delta).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            tracing::warn!("claude streaming read error: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = child.wait().await;
+    });
+
+    ReceiverStream::new(rx)
+}
+
+/// Pull `delta.text` out of a stream-json NDJSON frame. Returns None for any
+/// frame that isn't a text delta so the streaming loop can skip it cleanly.
+fn extract_text_delta(raw: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let frame_type = v.get("type")?.as_str()?;
+    // Primary delta format (Anthropic streaming): content_block_delta.
+    if frame_type == "content_block_delta" {
+        let delta = v.get("delta")?;
+        let delta_type = delta.get("type")?.as_str()?;
+        if delta_type == "text_delta" {
+            return delta.get("text")?.as_str().map(String::from);
+        }
+    }
+    // Some Claude Code CLI variants wrap the content in `message.content[*].text`
+    // on message_delta frames — handle that too.
+    if frame_type == "message" {
+        if let Some(content) = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+            let mut acc = String::new();
+            for block in content {
+                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                    acc.push_str(t);
+                }
+            }
+            if !acc.is_empty() { return Some(acc); }
+        }
+    }
+    None
 }
 
 /// Variant of `invoke_claude_cli` used by the ECG-interpret strict-JSON path.

@@ -326,6 +326,7 @@ async fn async_main() {
         .route("/api/v1/ai/interpret", post(ai::handlers::interpret))
         .route("/api/v1/ai/recommendations", post(ai::handlers::recommendations))
         .route("/api/v1/ai/chat", post(ai::handlers::chat))
+        .route("/api/v1/ai/chat-stream", post(ai::handlers::chat_stream))
         .route("/api/v1/ai/explain-metric", post(ai::handlers::explain_metric))
         .route("/api/v1/ai/action-plan", post(ai::handlers::action_plan))
         .route("/api/v1/ai/insights", post(ai::handlers::insights))
