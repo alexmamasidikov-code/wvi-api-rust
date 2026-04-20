@@ -2,3 +2,6 @@
 .env
 /target
 docs/qa/__pycache__/
+.env.bak.*
+CLAUDE.md
+.env.example.bak

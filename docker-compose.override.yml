@@ -1,0 +1,36 @@
+# Local override — mounts Claude Code CLI + auth into the api container.
+# Also remaps conflicting host ports so the stack coexists with other
+# deployments on this VPS. Not committed to git.
+
+services:
+  api:
+    volumes:
+      - /usr/bin/claude:/usr/bin/claude:ro
+      - /usr/lib/node_modules/@anthropic-ai/claude-code:/usr/lib/node_modules/@anthropic-ai/claude-code:ro
+      - /home/alex/.claude:/root/.claude
+      - /usr/bin/node:/usr/bin/node:ro
+    environment:
+      - CLAUDE_CODE_USE_VERTEX=
+      - CLAUDE_CODE_USE_BEDROCK=
+      - WVI_CLAUDE_MODEL=claude-sonnet-4-6
+
+  db:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  kafka:
+    ports: !reset []
+
+  zookeeper:
+    ports: !reset []
+
+  kong:
+    ports: !reset []
+
+  prometheus:
+    ports: !reset []
+
+  grafana:
+    ports: !reset []

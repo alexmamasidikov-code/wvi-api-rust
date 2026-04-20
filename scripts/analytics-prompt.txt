@@ -1,0 +1,12 @@
+You are analyzing health data from the WVI API. Do this:
+
+1. Run: curl -s -H 'Authorization: Bearer dev-token' http://localhost:8091/api/v1/biometrics/realtime
+2. Run: curl -s -H 'Authorization: Bearer dev-token' http://localhost:8091/api/v1/wvi/current
+3. Run: curl -s -H 'Authorization: Bearer dev-token' http://localhost:8091/api/v1/emotions/current
+4. Run: curl -s -H 'Authorization: Bearer dev-token' http://localhost:8091/api/v1/biometrics/recovery
+
+Analyze the data and write a JSON insight to the database:
+
+psql 'postgres://wvi:wvi_secure_2026@127.0.0.1:5433/wvi' -c "INSERT INTO alerts (user_id, type, severity, title, message, created_at) VALUES ((SELECT id FROM users LIMIT 1), 'ai_insight', 'info', 'AI Health Analysis', '<your analysis here>', NOW())"
+
+Keep your analysis to 2-3 sentences. Focus on: what's good, what needs attention, one actionable tip.
