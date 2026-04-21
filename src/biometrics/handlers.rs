@@ -1178,12 +1178,34 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
         qb.push_values(chunk, |mut b, r| { b.push_bind(uid).push_bind(r.0).push_bind(r.1); });
         qb.build().execute(&pool).await?;
     }
-    for chunk in act_rows.chunks(CHUNK) {
-        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO activity (user_id, timestamp, steps, calories, active_minutes, mets) ");
-        qb.push_values(chunk, |mut b, r| {
-            b.push_bind(uid).push_bind(r.0).push_bind(r.1).push_bind(r.2).push_bind(r.3).push_bind(r.4);
-        });
-        qb.build().execute(&pool).await?;
+    // Activity is daily-aggregate: each payload represents a whole
+    // day of step/calorie totals, not a moment. If iOS's bulk sync
+    // sends the same day multiple times (observed: 80 duplicate rows
+    // per day because JCV8 streams the history in partial callbacks
+    // and iOS uploaded on every chunk), plain INSERT grows the table
+    // forever and SUM(steps) over the day becomes 80× real value.
+    //
+    // Replace-per-day semantic: delete any existing rows for the
+    // days in this batch, then insert the new authoritative rows.
+    if !act_rows.is_empty() {
+        let days: std::collections::HashSet<chrono::NaiveDate> =
+            act_rows.iter().map(|r| r.0.date_naive()).collect();
+        for day in &days {
+            sqlx::query(
+                "DELETE FROM activity WHERE user_id = $1 AND timestamp::date = $2"
+            )
+            .bind(uid)
+            .bind(day)
+            .execute(&pool)
+            .await?;
+        }
+        for chunk in act_rows.chunks(CHUNK) {
+            let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("INSERT INTO activity (user_id, timestamp, steps, calories, active_minutes, mets) ");
+            qb.push_values(chunk, |mut b, r| {
+                b.push_bind(uid).push_bind(r.0).push_bind(r.1).push_bind(r.2).push_bind(r.3).push_bind(r.4);
+            });
+            qb.build().execute(&pool).await?;
+        }
     }
 
     // ── Emotion detection ──────────────────────────────────────────────────────
