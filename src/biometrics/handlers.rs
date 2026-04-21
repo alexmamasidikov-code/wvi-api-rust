@@ -33,13 +33,18 @@ pub async fn get_user_uuid(pool: &PgPool, privy_did: &str) -> AppResult<uuid::Uu
     // row on demand. Email/name backfill happens later when
     // /auth/verify is hit, or directly via Privy's /users/{did}.
     let uid = uuid::Uuid::new_v4();
+    // users.email is NOT NULL in the schema, so drop in a synthetic
+    // placeholder. /auth/verify will backfill with the real address
+    // the next time the iOS app finishes a Privy session.
+    let placeholder_email = format!("{privy_did}@provisioned.wellex");
     sqlx::query(
-        r#"INSERT INTO users (id, privy_did, created_at, updated_at)
-           VALUES ($1, $2, NOW(), NOW())
+        r#"INSERT INTO users (id, privy_did, email, created_at, updated_at)
+           VALUES ($1, $2, $3, NOW(), NOW())
            ON CONFLICT (privy_did) DO NOTHING"#
     )
     .bind(uid)
     .bind(privy_did)
+    .bind(&placeholder_email)
     .execute(pool)
     .await?;
     // If another request raced us to INSERT, SELECT wins.
