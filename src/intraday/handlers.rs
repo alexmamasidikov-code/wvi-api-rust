@@ -50,10 +50,18 @@ pub async fn get_intraday(
         .fetch_all(&pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let pts: Vec<ChartPoint> = rows
-            .into_iter()
-            .map(|(ts, v)| ChartPoint { ts, value: v, min: None, max: None })
-            .collect();
+        let pts: Vec<ChartPoint> = if rows.is_empty() {
+            // Fallback: aggregate raw tables into 15-min buckets.
+            // Partitioned biometrics_1min / biometrics_5min stay
+            // empty until the worker lands, but iOS's chart needs
+            // SOME data to render varying bars instead of the flat
+            // fallback. Same approach as /stress/v2/intraday.
+            fallback_raw_bucketed(&pool, &user.privy_did, &q.metric, start, end, 15).await
+        } else {
+            rows.into_iter()
+                .map(|(ts, v)| ChartPoint { ts, value: v, min: None, max: None })
+                .collect()
+        };
         (pts, "1min".to_string())
     } else {
         let rows: Vec<(chrono::DateTime<Utc>, f64, Option<f64>, Option<f64>)> = sqlx::query_as(
@@ -69,10 +77,19 @@ pub async fn get_intraday(
         .fetch_all(&pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let pts: Vec<ChartPoint> = rows
-            .into_iter()
-            .map(|(ts, m, mn, mx)| ChartPoint { ts, value: m, min: mn, max: mx })
-            .collect();
+        let pts: Vec<ChartPoint> = if rows.is_empty() {
+            // Multi-day view → bigger buckets (1h for 7d, 1d for 30d+).
+            let minutes = match q.period.as_str() {
+                "7d" => 60,
+                "30d" => 360,
+                _ => 1440,
+            };
+            fallback_raw_bucketed(&pool, &user.privy_did, &q.metric, start, end, minutes).await
+        } else {
+            rows.into_iter()
+                .map(|(ts, m, mn, mx)| ChartPoint { ts, value: m, min: mn, max: mx })
+                .collect()
+        };
         (pts, "5min".to_string())
     };
 
@@ -160,6 +177,63 @@ pub async fn get_intraday(
         backfill_in_progress,
         backfill_progress,
     }))
+}
+
+/// Aggregate raw per-metric tables into N-minute buckets when the
+/// partitioned biometrics_1min / biometrics_5min rollups haven't been
+/// populated by a worker yet. Keeps the chart endpoints honest with
+/// real data during the period before an aggregation pipeline exists.
+async fn fallback_raw_bucketed(
+    pool: &PgPool,
+    privy_did: &str,
+    metric: &str,
+    start: chrono::DateTime<Utc>,
+    end: chrono::DateTime<Utc>,
+    bucket_minutes: i32,
+) -> Vec<ChartPoint> {
+    let (table, value_col) = match metric {
+        "hr" | "heart_rate" => ("heart_rate", "bpm"),
+        "hrv" | "rmssd" => ("hrv", "rmssd"),
+        "stress" => ("hrv", "stress"),
+        "spo2" => ("spo2", "value"),
+        "temp" | "temperature" => ("temperature", "value"),
+        "steps" => ("activity", "steps"),
+        _ => return vec![],
+    };
+    let sql = format!(
+        r#"
+        SELECT
+            (date_trunc('minute', timestamp) - (EXTRACT(minute FROM timestamp)::int % $3 || ' minutes')::interval) AS bucket,
+            AVG({value_col})::float8 AS avg_v,
+            MIN({value_col})::float8 AS min_v,
+            MAX({value_col})::float8 AS max_v
+        FROM {table}
+        WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+          AND timestamp BETWEEN $4 AND $5
+          AND {value_col} IS NOT NULL
+        GROUP BY 1
+        ORDER BY 1 ASC
+        "#
+    );
+    let rows: Vec<(chrono::DateTime<Utc>, Option<f64>, Option<f64>, Option<f64>)> =
+        match sqlx::query_as(&sql)
+            .bind(privy_did)
+            .bind(metric)
+            .bind(bucket_minutes)
+            .bind(start)
+            .bind(end)
+            .fetch_all(pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("intraday fallback query failed: {e}");
+                return vec![];
+            }
+        };
+    rows.into_iter()
+        .filter_map(|(ts, mean, mn, mx)| mean.map(|v| ChartPoint { ts, value: v, min: mn, max: mx }))
+        .collect()
 }
 
 async fn fetch_compare(
