@@ -28,6 +28,7 @@ pub async fn get_intraday(
     .await
     .map_err(AppError::from)?;
 
+    let pre_agg_count = rows.len();
     let points: Vec<serde_json::Value> = if rows.is_empty() {
         let buckets: Vec<(chrono::DateTime<chrono::Utc>, f64)> = sqlx::query_as(
             r#"
@@ -63,5 +64,11 @@ pub async fn get_intraday(
         }).collect()
     };
 
+    tracing::info!(
+        "/stress/v2/intraday user={} pre_agg={} returning {} points (first: {}, last: {})",
+        user.privy_did, pre_agg_count, points.len(),
+        points.first().map(|p| p.to_string()).unwrap_or_else(|| "none".into()),
+        points.last().map(|p| p.to_string()).unwrap_or_else(|| "none".into())
+    );
     Ok(Json(serde_json::json!({"points": points})))
 }
