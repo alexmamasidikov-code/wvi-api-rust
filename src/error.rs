@@ -37,6 +37,12 @@ impl IntoResponse for AppError {
             AppError::Validation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
         };
 
+        // Surface 5xx errors in logs so debugging doesn't require
+        // attaching to the Docker container to cat Rust stderr.
+        if status.is_server_error() {
+            tracing::error!("AppError {}: {}", status.as_u16(), message);
+        }
+
         let body = json!({
             "success": false,
             "error": message,
