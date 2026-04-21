@@ -197,17 +197,43 @@ pub async fn get_sleep(user: AuthUser, State(pool): State<PgPool>, Query(q): Que
 
 pub async fn post_sleep(user: AuthUser, State(pool): State<PgPool>, Json(body): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
-    sqlx::query("INSERT INTO sleep_records (user_id, date, total_hours, sleep_score, deep_percent, light_percent, rem_percent, avg_hr, avg_hrv) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
-        .bind(uid)
-        .bind(body.get("date").and_then(|v| v.as_str()).and_then(|s| s.parse::<chrono::NaiveDate>().ok()).unwrap_or_else(|| Utc::now().date_naive()))
-        .bind(body.get("totalHours").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("sleepScore").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("deepPercent").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("lightPercent").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("remPercent").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("avgHR").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .bind(body.get("avgHRV").and_then(|v| v.as_f64()).map(|v| v as f32))
-        .execute(&pool).await?;
+    let date = body.get("date").and_then(|v| v.as_str()).and_then(|s| s.parse::<chrono::NaiveDate>().ok()).unwrap_or_else(|| Utc::now().date_naive());
+    let total_hours = body.get("totalHours").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let sleep_score = body.get("sleepScore").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let deep_pct = body.get("deepPercent").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let light_pct = body.get("lightPercent").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let rem_pct = body.get("remPercent").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let awake_pct = body.get("awakePercent").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let avg_hr = body.get("avgHR").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let avg_hrv = body.get("avgHRV").and_then(|v| v.as_f64()).map(|v| v as f32);
+
+    // UPSERT by (user_id, date) so iOS retries / double-taps settle to
+    // one authoritative row per night instead of growing the table.
+    // Before this the handler used plain INSERT which died silently
+    // on any duplicate (Postgres unique constraint or just extra
+    // rows polluting /sleep/last-night reads).
+    sqlx::query(r#"
+        INSERT INTO sleep_records (user_id, date, total_hours, sleep_score, deep_percent, light_percent, rem_percent, awake_percent, avg_hr, avg_hrv, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        ON CONFLICT (user_id, date) DO UPDATE SET
+            total_hours = EXCLUDED.total_hours,
+            sleep_score = EXCLUDED.sleep_score,
+            deep_percent = EXCLUDED.deep_percent,
+            light_percent = EXCLUDED.light_percent,
+            rem_percent = EXCLUDED.rem_percent,
+            awake_percent = COALESCE(EXCLUDED.awake_percent, sleep_records.awake_percent),
+            avg_hr = COALESCE(EXCLUDED.avg_hr, sleep_records.avg_hr),
+            avg_hrv = COALESCE(EXCLUDED.avg_hrv, sleep_records.avg_hrv)
+    "#)
+        .bind(uid).bind(date).bind(total_hours).bind(sleep_score)
+        .bind(deep_pct).bind(light_pct).bind(rem_pct).bind(awake_pct)
+        .bind(avg_hr).bind(avg_hrv)
+        .execute(&pool).await
+        .map_err(|e| {
+            tracing::error!("post_sleep insert failed: {e}");
+            AppError::Database(e)
+        })?;
+    tracing::info!("sleep recorded: user={} date={} score={:?} hours={:?}", uid, date, sleep_score, total_hours);
     Ok(Json(serde_json::json!({ "success": true, "data": { "recordsSaved": 1, "type": "sleep" } })))
 }
 
