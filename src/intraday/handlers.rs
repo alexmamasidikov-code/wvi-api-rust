@@ -198,7 +198,7 @@ async fn fallback_raw_bucketed(
         "spo2" => ("spo2", "value"),
         "temp" | "temperature" => ("temperature", "value"),
         "steps" => ("activity", "steps"),
-        "calories" => ("activity", "calories"),
+        "calories" => return fallback_calories_from_hr(pool, privy_did, start, end, bucket_minutes).await,
         "distance" => ("activity", "distance"),
         "active_minutes" | "active" => ("activity", "active_minutes"),
         "wvi" => ("wvi_scores", "wvi_score"),
@@ -291,6 +291,61 @@ async fn fallback_sleep(
         s.map(|v| {
             let ts = d.and_hms_opt(7, 0, 0).unwrap().and_utc();
             ChartPoint { ts, value: v as f64, min: None, max: None }
+        })
+    }).collect()
+}
+
+/// Estimate calories-per-bucket from HR, since `activity.calories`
+/// is a single daily aggregate (one row per day) — graphing it
+/// directly gave the same value replicated N times = flat line.
+/// Formula approximates: kcal/hour ≈ HR × 0.6 for a ~70 kg adult
+/// (close to the Keytel equation in its mid-range). Converted to
+/// per-bucket kcal by scaling by bucket length.
+async fn fallback_calories_from_hr(
+    pool: &PgPool,
+    privy_did: &str,
+    start: chrono::DateTime<Utc>,
+    end: chrono::DateTime<Utc>,
+    bucket_minutes: i32,
+) -> Vec<ChartPoint> {
+    let rows: Vec<(chrono::DateTime<Utc>, Option<f64>)> = match sqlx::query_as(
+        r#"
+        SELECT
+            (date_trunc('minute', timestamp) - (EXTRACT(minute FROM timestamp)::int % $3 || ' minutes')::interval) AS bucket,
+            AVG(bpm)::float8 AS avg_hr
+        FROM heart_rate
+        WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+          AND timestamp BETWEEN $2 AND $4
+        GROUP BY 1
+        ORDER BY 1 ASC
+        "#
+    )
+    .bind(privy_did)
+    .bind(start)
+    .bind(bucket_minutes)
+    .bind(end)
+    .fetch_all(pool)
+    .await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("calories-from-hr query failed: {e}");
+            return vec![];
+        }
+    };
+
+    rows.into_iter().filter_map(|(ts, hr)| {
+        hr.map(|avg_hr| {
+            // Resting HR baseline ~60 bpm below which we burn only BMR
+            // (fixed factor). Above baseline, each bpm above adds
+            // ~0.08 kcal/min for a 70 kg adult.
+            let bpm = avg_hr.max(40.0);
+            let per_minute = if bpm < 60.0 {
+                1.0 // BMR floor ~60 kcal/hour ≈ 1 kcal/min
+            } else {
+                1.0 + (bpm - 60.0) * 0.08
+            };
+            let kcal = per_minute * bucket_minutes as f64;
+            ChartPoint { ts, value: kcal, min: None, max: None }
         })
     }).collect()
 }
