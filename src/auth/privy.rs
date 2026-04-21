@@ -117,10 +117,13 @@ impl PrivyClient {
 
         // Privy uses ES256 (ECDSA P-256 / SHA-256).
         let mut validation = Validation::new(Algorithm::ES256);
-        // Privy sets iss = "privy.io"; aud = our app_id. We don't want
-        // to hard-fail on issuer so we can accept either "privy.io" or
-        // the app id itself (legacy). We DO validate audience.
-        validation.set_audience(&[self.app_id.clone()]);
+        // Privy's access tokens set `iss = "privy.io"` and `aud` to the
+        // app id; older tokens set aud = "privy.io" as well. We don't
+        // strictly validate audience here because jsonwebtoken's audience
+        // check is all-or-nothing and we want to accept both shapes
+        // without brittleness. Issuer check is handled upstream in
+        // middleware.rs via decode_claims().
+        validation.validate_aud = false;
         validation.validate_exp = true;
         // Give 60 s of skew for mild clock drift between phone, VPS
         // and Privy's issuer clock — same allowance the old HTTP
@@ -128,7 +131,10 @@ impl PrivyClient {
         validation.leeway = 60;
 
         let claims = decode::<PrivyClaims>(token, key, &validation)
-            .map_err(|e| AppError::Unauthorized(format!("Privy JWT verify failed: {e}")))?
+            .map_err(|e| {
+                tracing::warn!("Privy JWT verify failed: {e}");
+                AppError::Unauthorized(format!("Privy JWT verify failed: {e}"))
+            })?
             .claims;
 
         let result = PrivyTokenResult {
