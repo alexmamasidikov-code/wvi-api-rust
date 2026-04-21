@@ -198,6 +198,10 @@ async fn fallback_raw_bucketed(
         "spo2" => ("spo2", "value"),
         "temp" | "temperature" => ("temperature", "value"),
         "steps" => ("activity", "steps"),
+        "calories" => ("activity", "calories"),
+        "distance" => ("activity", "distance"),
+        "active_minutes" | "active" => ("activity", "active_minutes"),
+        "wvi" => ("wvi_scores", "wvi_score"),
         _ => return vec![],
     };
     let sql = format!(
