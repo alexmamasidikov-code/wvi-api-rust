@@ -201,6 +201,97 @@ pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResul
     Ok(Json(serde_json::json!({ "success": true, "data": result })))
 }
 
+/// POST /wvi/backfill
+///
+/// After a bulk biometrics sync the iOS app has uploaded up to 7
+/// days of HR/HRV/SpO2/Temp/Activity/Sleep with historical
+/// timestamps. `/biometrics/sync` only writes a SINGLE wvi_scores
+/// row at NOW(), so the 14-day trend on HOME/HERO stays empty
+/// until the user wears the bracelet for 14 more days.
+///
+/// This endpoint aggregates each day's metrics, runs the
+/// WviV2Calculator, and UPSERTs one wvi_scores row per day at
+/// noon-local so the history chart renders a real 7-day trend
+/// immediately after sync.
+pub async fn backfill(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE privy_did = $1")
+        .bind(&user.privy_did).fetch_one(&pool).await?;
+
+    // Collect every calendar day (user's local ≈ UTC for now) that
+    // has at least one HR or HRV or Activity row in the last 14d.
+    let days: Vec<chrono::NaiveDate> = sqlx::query_scalar::<_, chrono::NaiveDate>(r#"
+        SELECT DISTINCT day FROM (
+            SELECT timestamp::date AS day FROM heart_rate WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '14 days'
+            UNION SELECT timestamp::date FROM hrv WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '14 days'
+            UNION SELECT timestamp::date FROM activity WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '14 days'
+        ) u ORDER BY day
+    "#).bind(uid).fetch_all(&pool).await?;
+
+    let mut written = 0usize;
+    for day in &days {
+        // Per-day aggregates.
+        let (hr_avg, hrv_avg, spo2_avg, temp_avg): (Option<f64>, Option<f64>, Option<f64>, Option<f64>) =
+            sqlx::query_as(r#"
+                SELECT
+                    (SELECT AVG(bpm)::float8 FROM heart_rate WHERE user_id = $1 AND timestamp::date = $2),
+                    (SELECT AVG(rmssd)::float8 FROM hrv WHERE user_id = $1 AND timestamp::date = $2),
+                    (SELECT AVG(value)::float8 FROM spo2 WHERE user_id = $1 AND timestamp::date = $2),
+                    (SELECT AVG(value)::float8 FROM temperature WHERE user_id = $1 AND timestamp::date = $2)
+            "#).bind(uid).bind(day).fetch_one(&pool).await?;
+
+        let sleep: (Option<f32>, Option<f32>, Option<f32>) = sqlx::query_as(
+            "SELECT sleep_score, total_hours, deep_percent FROM sleep_records WHERE user_id = $1 AND date = $2"
+        ).bind(uid).bind(day).fetch_optional(&pool).await?.unwrap_or((None, None, None));
+
+        let steps: Option<f64> = sqlx::query_scalar(
+            "SELECT MAX(steps)::float8 FROM activity WHERE user_id = $1 AND timestamp::date = $2"
+        ).bind(uid).bind(day).fetch_one(&pool).await?;
+
+        // If we have neither HR nor HRV for the day, skip — no meaningful WVI.
+        if hr_avg.is_none() && hrv_avg.is_none() { continue; }
+
+        let input = WviV2Input {
+            hrv_rmssd: hrv_avg.unwrap_or(45.0),
+            stress_index: hrv_avg.map(|v| (100.0 - (v / 0.7).min(100.0)).max(0.0)).unwrap_or(40.0),
+            sleep_score: sleep.0.map(|v| v as f64).unwrap_or(60.0),
+            emotion_score: 55.0,
+            spo2: spo2_avg.unwrap_or(98.0),
+            heart_rate: hr_avg.unwrap_or(70.0),
+            resting_hr: 65.0,
+            steps: steps.unwrap_or(0.0),
+            active_calories: 0.0,
+            acwr: 1.0,
+            bp_systolic: 120.0,
+            bp_diastolic: 80.0,
+            temp_delta: temp_avg.map(|v| v - 36.6).unwrap_or(-2.6),
+            ppi_coherence: 0.4,
+            emotion_name: String::new(),
+        };
+        let result = WviV2Calculator::calculate(&input);
+
+        // Noon-UTC anchor for the day so ORDER BY timestamp stays stable.
+        let ts = day.and_hms_opt(12, 0, 0).unwrap().and_utc();
+
+        sqlx::query(r#"
+            INSERT INTO wvi_scores (user_id, timestamp, wvi_score, level, metrics, weights, emotion_feedback)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (user_id, timestamp) DO UPDATE SET
+                wvi_score = EXCLUDED.wvi_score,
+                level = EXCLUDED.level,
+                metrics = EXCLUDED.metrics
+        "#)
+        .bind(uid).bind(ts).bind(result.wvi_score as f32).bind(&result.level)
+        .bind(serde_json::to_value(&result.metric_scores).unwrap_or_default())
+        .bind(serde_json::json!({ "version": "2.0-backfill", "type": "daily_aggregate" }))
+        .bind(result.emotion_multiplier as f32)
+        .execute(&pool).await?;
+
+        written += 1;
+    }
+
+    Ok(Json(serde_json::json!({ "success": true, "data": { "daysWritten": written, "daysExamined": days.len() } })))
+}
+
 /// GET /wvi/history
 pub async fn get_history(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<WVIHistoryQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(|| Utc::now() - Duration::days(7));

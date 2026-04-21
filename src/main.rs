@@ -276,6 +276,7 @@ async fn async_main() {
         // ═══ WVI (10) ═══
         .route("/api/v1/wvi/current", get(wvi::handlers::get_current))
         .route("/api/v1/wvi/history", get(wvi::handlers::get_history))
+        .route("/api/v1/wvi/backfill", post(wvi::handlers::backfill))
         .route("/api/v1/wvi/trends", get(wvi::handlers::get_trends))
         .route("/api/v1/wvi/predict", get(wvi::handlers::predict))
         .route("/api/v1/wvi/simulate", post(wvi::handlers::simulate))
