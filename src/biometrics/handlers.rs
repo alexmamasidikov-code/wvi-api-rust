@@ -19,11 +19,36 @@ fn default_to() -> chrono::DateTime<Utc> {
 }
 
 pub async fn get_user_uuid(pool: &PgPool, privy_did: &str) -> AppResult<uuid::Uuid> {
-    sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE privy_did = $1")
-        .bind(privy_did)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| crate::error::AppError::NotFound("User not found".into()))
+    // Fast path — user already exists.
+    if let Some(uid) = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM users WHERE privy_did = $1"
+    ).bind(privy_did).fetch_optional(pool).await? {
+        return Ok(uid);
+    }
+    // Just-in-time provisioning. Before this, every biometrics/sync
+    // request 404'd for users who authenticated via Privy but whose
+    // iOS /auth/verify sync had earlier failed (e.g. while we were
+    // still on the dead /token/verify endpoint). The JWT is already
+    // verified by middleware — trust the privy_did and create the
+    // row on demand. Email/name backfill happens later when
+    // /auth/verify is hit, or directly via Privy's /users/{did}.
+    let uid = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO users (id, privy_did, created_at, updated_at)
+           VALUES ($1, $2, NOW(), NOW())
+           ON CONFLICT (privy_did) DO NOTHING"#
+    )
+    .bind(uid)
+    .bind(privy_did)
+    .execute(pool)
+    .await?;
+    // If another request raced us to INSERT, SELECT wins.
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM users WHERE privy_did = $1"
+    ).bind(privy_did).fetch_one(pool).await
+        .map_err(|e| crate::error::AppError::Internal(
+            format!("user provisioning failed: {e}")
+        ))
 }
 
 // ═══ HEART RATE ═══
