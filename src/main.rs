@@ -427,6 +427,7 @@ async fn async_main() {
 
         // ═══ STRESS v2 (Project C — 1-min score + 5-level + micro-pulse) ═══
         .route("/api/v1/stress/v2/intraday", get(stress::v2::handlers::get_intraday))
+        .route("/api/v1/stress/sources", get(stress::v2::handlers::get_sources))
 
         // ═══ SENSITIVITY (Project B — signals + baselines + contextual AI) ═══
         .route("/api/v1/signals", get(sensitivity::handlers::get_signals))
