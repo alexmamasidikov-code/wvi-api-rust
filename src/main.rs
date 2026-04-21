@@ -200,10 +200,15 @@ async fn async_main() {
         }
     };
 
-    // Privy client
+    // Privy client — now verifies tokens LOCALLY against the ES256
+    // authorization public key because Privy deprecated their
+    // /api/v1/token/verify endpoint (every call returned a 404 HTML
+    // page since ~April 2026, which iOS surfaced as
+    // "activity-history HTTP 401" on every bulk sync).
     let privy = Arc::new(PrivyClient::new(
         cfg.privy_app_id.clone(),
         cfg.privy_app_secret.clone(),
+        cfg.privy_verification_key.clone(),
     ));
     if privy.is_configured() {
         tracing::info!("Privy auth configured");

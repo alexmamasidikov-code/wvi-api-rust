@@ -7,6 +7,12 @@ pub struct Config {
     // Privy Auth
     pub privy_app_id: String,
     pub privy_app_secret: String,
+    /// Privy's ES256 authorization public key (PEM / SPKI). Used to
+    /// verify access-token JWTs locally — Privy deprecated the
+    /// `/api/v1/token/verify` endpoint (returns 404 HTML now), so the
+    /// only path that works is decoding the JWT signature against this
+    /// key. Pulled from `PRIVY_AUTHORIZATION_PUBLIC_KEY` env var.
+    pub privy_verification_key: String,
     // AI (custom model — Nematron/Qwen, configured later)
     pub ai_api_url: String,
     pub ai_api_key: String,
@@ -24,6 +30,8 @@ impl Config {
                 .unwrap_or(8091),
             privy_app_id: env::var("PRIVY_APP_ID").unwrap_or_default(),
             privy_app_secret: env::var("PRIVY_APP_SECRET").unwrap_or_default(),
+            privy_verification_key: env::var("PRIVY_AUTHORIZATION_PUBLIC_KEY")
+                .unwrap_or_default(),
             ai_api_url: env::var("AI_API_URL").unwrap_or_default(),
             ai_api_key: env::var("AI_API_KEY").unwrap_or_default(),
             ai_model: env::var("AI_MODEL").unwrap_or_else(|_| "nematron".into()),
