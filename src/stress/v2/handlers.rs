@@ -106,7 +106,25 @@ pub async fn get_intraday(
     .map_err(AppError::from)?;
 
     let pre_agg_count = rows.len();
-    let points: Vec<serde_json::Value> = if rows.is_empty() {
+    // The `stress_samples_1min` aggregator (when populated) writes
+    // the CURRENT snapshot stress score every minute. If the live
+    // HRV doesn't change for a while those rows are all identical
+    // (seen: 56.3 × 20+ rows for this user → flat 10 identical
+    // bars on iOS). Fallback-to-hrv bucketing is always more
+    // informative because it reflects real per-sample variance.
+    //
+    // Heuristic: keep the aggregator path only when it has
+    // MEANINGFUL variance (stddev > 3). Otherwise discard and fall
+    // back to hrv bucketing so the chart has real movement.
+    let aggregator_variance: Option<f64> = if rows.is_empty() {
+        None
+    } else {
+        let mean = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;
+        let variance = rows.iter().map(|r| (r.1 - mean).powi(2)).sum::<f64>() / rows.len() as f64;
+        Some(variance.sqrt())
+    };
+    let use_aggregator = aggregator_variance.map(|sd| sd >= 3.0).unwrap_or(false);
+    let points: Vec<serde_json::Value> = if !use_aggregator {
         let buckets: Vec<(chrono::DateTime<chrono::Utc>, f64)> = sqlx::query_as(
             r#"
             SELECT
@@ -142,10 +160,8 @@ pub async fn get_intraday(
     };
 
     tracing::info!(
-        "/stress/v2/intraday user={} pre_agg={} returning {} points (first: {}, last: {})",
-        user.privy_did, pre_agg_count, points.len(),
-        points.first().map(|p| p.to_string()).unwrap_or_else(|| "none".into()),
-        points.last().map(|p| p.to_string()).unwrap_or_else(|| "none".into())
+        "/stress/v2/intraday user={} pre_agg={} agg_sd={:?} use_agg={} returning {} points",
+        user.privy_did, pre_agg_count, aggregator_variance, use_aggregator, points.len()
     );
     Ok(Json(serde_json::json!({"points": points})))
 }
