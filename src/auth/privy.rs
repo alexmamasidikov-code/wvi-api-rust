@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
@@ -10,6 +10,27 @@ use super::models::{PrivyTokenResult, PrivyUser};
 
 const PRIVY_API_BASE: &str = "https://auth.privy.io/api/v1";
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
+/// JWKS is rotated rarely; refresh once an hour is plenty.
+const JWKS_TTL: Duration = Duration::from_secs(3600);
+
+#[derive(Debug, Deserialize, Clone)]
+struct Jwk {
+    kid: String,
+    #[serde(default)]
+    kty: String,
+    #[serde(default)]
+    crv: String,
+    x: String,
+    y: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    alg: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Jwks {
+    keys: Vec<Jwk>,
+}
 
 /// Claims we actually read from the Privy access-token JWT.
 /// Privy's spec: `sub` holds the user DID, `iss` is "privy.io",
@@ -32,57 +53,91 @@ struct PrivyClaims {
 ///
 /// 2026-04-21: switched from the old HTTP `/api/v1/token/verify`
 /// endpoint (now returns Privy's 404 HTML page) to local JWT
-/// verification using the ES256 authorization public key that Privy
-/// hands out in the app settings and the iOS app already ships. Every
-/// `/biometrics/sync` request was failing 401 until this fix.
+/// verification using Privy's JWKS endpoint
+/// (`/api/v1/apps/{app_id}/jwks.json`). Access-token JWTs are signed
+/// with ES256 keys rotated via that JWKS; `PRIVY_AUTHORIZATION_PUBLIC_KEY`
+/// in env is for wallet-action authorisation, not token verification,
+/// so using it produced `InvalidSignature` on every request. Now we
+/// fetch JWKS at startup, cache per `kid` in memory, and refetch once
+/// an hour (or immediately if an unknown `kid` shows up in a token).
 pub struct PrivyClient {
     app_id: String,
     app_secret: String,
-    /// Pre-parsed ES256 decoding key. `None` means no verification key
-    /// was configured and the middleware dev-user bypass applies.
-    verify_key: Option<DecodingKey>,
     http: reqwest::Client,
+    /// Decoded JWKS keyed by `kid`. Wrapped in Mutex because refresh
+    /// mutates, but read paths are rare (< once per request after
+    /// warm-up) so contention is a non-issue at our scale.
+    jwks: Mutex<HashMap<String, DecodingKey>>,
+    jwks_fetched_at: Mutex<Option<Instant>>,
     cache: Mutex<HashMap<String, (PrivyTokenResult, Instant)>>,
 }
 
 impl PrivyClient {
-    pub fn new(app_id: String, app_secret: String, verification_key_pem: String) -> Self {
-        // Accept either a ready-made PEM (with BEGIN/END lines) or a
-        // bare base64 SPKI blob as Privy hands out. Wrap the latter so
-        // `DecodingKey::from_ec_pem` understands it.
-        let verify_key = if verification_key_pem.trim().is_empty() {
-            None
-        } else {
-            let pem = if verification_key_pem.contains("BEGIN") {
-                verification_key_pem.clone()
-            } else {
-                format!(
-                    "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
-                    verification_key_pem.trim()
-                )
-            };
-            match DecodingKey::from_ec_pem(pem.as_bytes()) {
-                Ok(k) => Some(k),
-                Err(e) => {
-                    tracing::error!("Privy verification key parse failed: {e}");
-                    None
-                }
-            }
-        };
+    pub fn new(app_id: String, app_secret: String, _verification_key_pem: String) -> Self {
+        // verification_key_pem arg kept for API compatibility; we now
+        // source keys from Privy's JWKS instead of the env-pinned key.
         Self {
             app_id,
             app_secret,
-            verify_key,
             http: reqwest::Client::new(),
+            jwks: Mutex::new(HashMap::new()),
+            jwks_fetched_at: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Check if Privy is configured (non-empty credentials + parsable key)
+    /// Check if Privy is configured (non-empty credentials).
+    /// JWKS is fetched lazily on first verify call, so absence of it
+    /// here doesn't mean unconfigured.
     pub fn is_configured(&self) -> bool {
-        !self.app_id.is_empty()
-            && !self.app_secret.is_empty()
-            && self.verify_key.is_some()
+        !self.app_id.is_empty() && !self.app_secret.is_empty()
+    }
+
+    /// Fetch JWKS from Privy and populate the keyring. Called on
+    /// startup and whenever we see a token whose `kid` we don't
+    /// recognise (so key rotation works without a restart).
+    async fn refresh_jwks(&self) -> AppResult<()> {
+        let url = format!("{PRIVY_API_BASE}/apps/{}/jwks.json", self.app_id);
+        let resp = self.http.get(&url).send().await
+            .map_err(|e| AppError::Internal(format!("JWKS fetch failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(AppError::Internal(
+                format!("JWKS returned {}", resp.status())
+            ));
+        }
+        let body: Jwks = resp.json().await
+            .map_err(|e| AppError::Internal(format!("JWKS parse failed: {e}")))?;
+
+        let mut map = HashMap::new();
+        for k in body.keys {
+            if k.kty != "EC" || k.crv != "P-256" {
+                continue;
+            }
+            // jsonwebtoken ≥ 9 accepts EC JWKs directly.
+            match DecodingKey::from_ec_components(&k.x, &k.y) {
+                Ok(dk) => { map.insert(k.kid.clone(), dk); }
+                Err(e) => tracing::warn!("JWKS kid={} parse failed: {e}", k.kid),
+            }
+        }
+        if let Ok(mut jwks) = self.jwks.lock() {
+            *jwks = map;
+        }
+        if let Ok(mut ts) = self.jwks_fetched_at.lock() {
+            *ts = Some(Instant::now());
+        }
+        tracing::info!("Privy JWKS refreshed ({} keys)",
+            self.jwks.lock().map(|m| m.len()).unwrap_or(0));
+        Ok(())
+    }
+
+    fn jwks_is_stale(&self) -> bool {
+        match self.jwks_fetched_at.lock() {
+            Ok(guard) => match *guard {
+                Some(t) => t.elapsed() > JWKS_TTL,
+                None => true,
+            },
+            Err(_) => true,
+        }
     }
 
     /// Basic auth header value: base64(app_id:app_secret)
@@ -93,14 +148,13 @@ impl PrivyClient {
         format!("Basic {}", base64_encode(&buf))
     }
 
-    /// Verify a Privy access token LOCALLY via ES256.
+    /// Verify a Privy access token LOCALLY via ES256 + JWKS.
     ///
     /// Privy deprecated POST /api/v1/token/verify — it returns a
-    /// generic 404 HTML page, which surfaced to iOS as
-    /// `activity-history HTTP 401` on every sync attempt. Local
-    /// verification is what Privy recommends now: decode the JWT
-    /// signature against the authorization public key, check exp /
-    /// iss / aud, and trust the `sub` claim as the user DID.
+    /// generic 404 HTML page. Verification now reads the token's `kid`
+    /// header, looks up the matching ES256 public key from Privy's
+    /// JWKS (`/api/v1/apps/{app_id}/jwks.json`), and decodes against
+    /// it. JWKS is fetched once per hour or when a kid misses.
     pub async fn verify_token(&self, token: &str) -> AppResult<PrivyTokenResult> {
         // Check cache first
         if let Ok(cache) = self.cache.lock() {
@@ -111,28 +165,40 @@ impl PrivyClient {
             }
         }
 
-        let key = self.verify_key.as_ref().ok_or_else(|| {
-            AppError::Internal("Privy verification key not configured".into())
+        // Peek the JWT header so we know which kid to look up.
+        let header = decode_header(token)
+            .map_err(|e| AppError::Unauthorized(format!("JWT header parse failed: {e}")))?;
+        let kid = header.kid.ok_or_else(|| {
+            AppError::Unauthorized("JWT missing kid header".into())
+        })?;
+
+        // Make sure JWKS is loaded and reasonably fresh.
+        if self.jwks_is_stale() {
+            let _ = self.refresh_jwks().await;
+        }
+        let mut dk = self.jwks.lock().ok().and_then(|m| m.get(&kid).cloned());
+        if dk.is_none() {
+            // Unknown kid — perhaps Privy rotated. One more refresh.
+            let _ = self.refresh_jwks().await;
+            dk = self.jwks.lock().ok().and_then(|m| m.get(&kid).cloned());
+        }
+        let key = dk.ok_or_else(|| {
+            AppError::Unauthorized(format!("JWT kid {kid} not in JWKS"))
         })?;
 
         // Privy uses ES256 (ECDSA P-256 / SHA-256).
         let mut validation = Validation::new(Algorithm::ES256);
-        // Privy's access tokens set `iss = "privy.io"` and `aud` to the
-        // app id; older tokens set aud = "privy.io" as well. We don't
-        // strictly validate audience here because jsonwebtoken's audience
-        // check is all-or-nothing and we want to accept both shapes
-        // without brittleness. Issuer check is handled upstream in
-        // middleware.rs via decode_claims().
+        // Don't strictly validate audience — Privy's access tokens set
+        // `aud = app_id` but we keep this tolerant so token-format tweaks
+        // on Privy's side don't break auth unexpectedly. Issuer is
+        // re-checked in middleware.rs::decode_claims.
         validation.validate_aud = false;
         validation.validate_exp = true;
-        // Give 60 s of skew for mild clock drift between phone, VPS
-        // and Privy's issuer clock — same allowance the old HTTP
-        // path had via TOKEN_SKEW_SECONDS.
         validation.leeway = 60;
 
-        let claims = decode::<PrivyClaims>(token, key, &validation)
+        let claims = decode::<PrivyClaims>(token, &key, &validation)
             .map_err(|e| {
-                tracing::warn!("Privy JWT verify failed: {e}");
+                tracing::warn!("Privy JWT verify failed (kid={kid}): {e}");
                 AppError::Unauthorized(format!("Privy JWT verify failed: {e}"))
             })?
             .claims;
