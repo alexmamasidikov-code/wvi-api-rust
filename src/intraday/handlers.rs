@@ -202,6 +202,9 @@ async fn fallback_raw_bucketed(
         "distance" => ("activity", "distance"),
         "active_minutes" | "active" => ("activity", "active_minutes"),
         "wvi" => ("wvi_scores", "wvi_score"),
+        "coherence" => ("ppi", "coherence"),
+        "recovery" => return fallback_recovery(pool, privy_did, start, end).await,
+        "sleep_score" | "sleep" => return fallback_sleep(pool, privy_did, start, end).await,
         _ => return vec![],
     };
     let sql = format!(
@@ -238,6 +241,58 @@ async fn fallback_raw_bucketed(
     rows.into_iter()
         .filter_map(|(ts, mean, mn, mx)| mean.map(|v| ChartPoint { ts, value: v, min: mn, max: mx }))
         .collect()
+}
+
+/// Recovery is daily — pull from sleep_records (one row per night,
+/// score blended with avg_hrv for that night).
+async fn fallback_recovery(
+    pool: &PgPool,
+    privy_did: &str,
+    start: chrono::DateTime<Utc>,
+    end: chrono::DateTime<Utc>,
+) -> Vec<ChartPoint> {
+    let rows: Vec<(chrono::NaiveDate, Option<f32>, Option<f32>)> = match sqlx::query_as(
+        r#"SELECT date, sleep_score, avg_hrv
+           FROM sleep_records
+           WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+             AND date BETWEEN $2 AND $3
+           ORDER BY date ASC"#
+    ).bind(privy_did).bind(start.date_naive()).bind(end.date_naive()).fetch_all(pool).await {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    rows.into_iter().map(|(d, score, hrv)| {
+        let s = score.unwrap_or(60.0) as f64;
+        let h = hrv.unwrap_or(40.0) as f64;
+        let recovery = (s * 0.6 + (h / 60.0 * 100.0).min(100.0) * 0.4).clamp(0.0, 100.0);
+        let ts = d.and_hms_opt(12, 0, 0).unwrap().and_utc();
+        ChartPoint { ts, value: recovery, min: None, max: None }
+    }).collect()
+}
+
+/// Sleep score per night.
+async fn fallback_sleep(
+    pool: &PgPool,
+    privy_did: &str,
+    start: chrono::DateTime<Utc>,
+    end: chrono::DateTime<Utc>,
+) -> Vec<ChartPoint> {
+    let rows: Vec<(chrono::NaiveDate, Option<f32>)> = match sqlx::query_as(
+        r#"SELECT date, sleep_score
+           FROM sleep_records
+           WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+             AND date BETWEEN $2 AND $3
+           ORDER BY date ASC"#
+    ).bind(privy_did).bind(start.date_naive()).bind(end.date_naive()).fetch_all(pool).await {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    rows.into_iter().filter_map(|(d, s)| {
+        s.map(|v| {
+            let ts = d.and_hms_opt(7, 0, 0).unwrap().and_utc();
+            ChartPoint { ts, value: v as f64, min: None, max: None }
+        })
+    }).collect()
 }
 
 async fn fetch_compare(
