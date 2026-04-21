@@ -1124,10 +1124,22 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
                 let rmssd_opt = f(&rec.data, "rmssd");
                 // Drop JCV8 firmware placeholder of exactly 70.0 ms.
                 if rmssd_opt == Some(70.0) { continue; }
+                // Derive stress from RMSSD when iOS didn't compute
+                // one itself. Without this every hrv row landed with
+                // stress=NULL and /biometrics/stress returned nothing
+                // — the Stress Detail chart collapsed to 7 bars of the
+                // same fallback value. Same formula iOS uses:
+                // stress = clamp(0, 100, 100 − rmssd / 0.7).
+                let stress_explicit = fo(&rec.data, "stress");
+                let stress_derived = rmssd_opt.map(|v| {
+                    let s = 100.0 - (v / 0.7).min(100.0);
+                    s.clamp(0.0, 100.0) as f32
+                });
+                let stress_for_row = stress_explicit.or(stress_derived);
                 hrv_rows.push((
                     rec.timestamp,
                     rmssd_opt.map(|v| v as f32),
-                    fo(&rec.data, "stress"),
+                    stress_for_row,
                     fo(&rec.data, "heartRate"),
                     fo(&rec.data, "systolicBP"),
                     fo(&rec.data, "diastolicBP"),
