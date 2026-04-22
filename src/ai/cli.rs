@@ -410,6 +410,17 @@ fn prompt_hash_u64(prompt: &str) -> u64 {
     h.finish()
 }
 
+/// Shared HTTP client for all gateway calls. Built once (keeps connection pool
+/// warm) — saves ~100 ms of TLS + TCP handshake per request.
+static GATEWAY_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(CLI_TIMEOUT)
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(16)
+        .build()
+        .expect("reqwest client build")
+});
+
 /// POST the prompt to the Wellex AI gateway (`AI_GATEWAY_URL`). The gateway
 /// decides which provider (Kimi / MiniMax) serves the call.
 ///
@@ -421,16 +432,11 @@ pub async fn invoke_ai_gateway(prompt: &str) -> Result<String, String> {
     let key = std::env::var("AI_GATEWAY_INTERNAL_KEY")
         .map_err(|_| "AI_GATEWAY_INTERNAL_KEY not set".to_string())?;
 
-    let client = reqwest::Client::builder()
-        .timeout(CLI_TIMEOUT)
-        .build()
-        .map_err(|e| format!("gateway http client: {e}"))?;
-
     let body = serde_json::json!({
         "messages": [{ "role": "user", "content": prompt }],
     });
 
-    let resp = client
+    let resp = GATEWAY_CLIENT
         .post(format!("{}/v1/chat", url.trim_end_matches('/')))
         .header("X-Internal-Key", key)
         .json(&body)
