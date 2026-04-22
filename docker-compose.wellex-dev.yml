@@ -19,6 +19,8 @@ services:
       PRIVY_APP_ID: "${PRIVY_APP_ID:-}"
       PRIVY_JWKS_URL: "https://auth.privy.io/api/v1/apps/${PRIVY_APP_ID:-}/jwks.json"
       TZ: "${TZ:-UTC}"
+      KAFKA_BROKERS: ""
+      KAFKA_ENABLED: "false"
       RATE_LIMIT_PER_SEC_READ: "1000"
       RATE_LIMIT_PER_SEC_WRITE: "500"
     networks: [wellex-net]
