@@ -270,6 +270,8 @@ async fn async_main() {
         .route("/api/v1/biometrics/coherence", get(biometrics::handlers::get_coherence))
         .route("/api/v1/biometrics/computed", get(biometrics::handlers::get_computed))
         .route("/api/v1/biometrics/recovery", get(biometrics::handlers::get_recovery))
+        .route("/api/v1/biometrics/cardio-summary", get(biometrics::handlers::get_cardio_summary))
+        .route("/api/v1/biometrics/bio-age-detail", get(biometrics::handlers::get_bio_age_detail))
         .route("/api/v1/biometrics/realtime", get(biometrics::handlers::get_realtime))
         .route("/api/v1/biometrics/summary", get(biometrics::handlers::get_summary))
 

@@ -1531,6 +1531,119 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
     })))
 }
 
+/// GET /biometrics/cardio-summary
+///
+/// Single-shot cardio tile for the Cardio detail screen. Returns latest
+/// HR, HRV, BP in one JSON instead of requiring the client to hit three
+/// separate endpoints. Matches iOS CardioStats DTO.
+pub async fn get_cardio_summary(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+
+    let hr: Option<i32> = sqlx::query_scalar(
+        "SELECT bpm FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
+    ).bind(uid).fetch_optional(&pool).await?;
+
+    let hrv: Option<i32> = sqlx::query_scalar(
+        "SELECT rmssd::int4 FROM hrv WHERE user_id = $1 AND rmssd IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
+    ).bind(uid).fetch_optional(&pool).await?;
+
+    let bp: Option<(i32, i32)> = sqlx::query_as(
+        r#"SELECT systolic_bp::int4, diastolic_bp::int4 FROM hrv
+           WHERE user_id = $1 AND systolic_bp IS NOT NULL AND diastolic_bp IS NOT NULL
+             AND bp_source IN ('manual', 'healthkit')
+           ORDER BY timestamp DESC LIMIT 1"#
+    ).bind(uid).fetch_optional(&pool).await?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "hr": hr,
+            "hrv": hrv,
+            "systolic": bp.map(|(s, _)| s),
+            "diastolic": bp.map(|(_, d)| d)
+        }
+    })))
+}
+
+/// GET /biometrics/bio-age-detail
+///
+/// Returns the bio-age factor breakdown + aging rate. Before this the
+/// iOS screen fell back to derived values on every render; now the
+/// server returns a computed summary.
+pub async fn get_bio_age_detail(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+
+    // Aggregate 30-day baselines.
+    let hrv_avg: Option<f64> = sqlx::query_scalar(
+        "SELECT AVG(rmssd)::float8 FROM hrv WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '30 days' AND rmssd IS NOT NULL"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(None);
+
+    let sleep_avg: Option<f64> = sqlx::query_scalar(
+        "SELECT AVG(sleep_score)::float8 FROM sleep_records WHERE user_id = $1 AND date > NOW()::date - INTERVAL '30 days'"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(None);
+
+    let stress_avg: Option<f64> = sqlx::query_scalar(
+        "SELECT AVG(stress)::float8 FROM hrv WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '30 days' AND stress IS NOT NULL"
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(None);
+
+    let resting_hr: Option<f64> = sqlx::query_scalar(
+        r#"SELECT percentile_cont(0.1) WITHIN GROUP (ORDER BY bpm)::float8
+           FROM heart_rate WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '14 days'"#
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(None);
+
+    // Map each signal to a tier-equivalent years delta (-2.5..+2.5).
+    fn score_delta(score: f64, ideal: f64, worst: f64) -> f64 {
+        let norm = ((score - worst) / (ideal - worst)).clamp(0.0, 1.0);
+        -2.5 + (1.0 - norm) * 5.0
+    }
+
+    let mut factors = vec![];
+    if let Some(s) = sleep_avg {
+        factors.push(serde_json::json!({
+            "name": "Sleep Quality",
+            "years_delta": score_delta(s, 85.0, 40.0),
+            "score_pct": s as i32
+        }));
+    }
+    if let Some(h) = hrv_avg {
+        let delta = score_delta(h, 55.0, 20.0);
+        factors.push(serde_json::json!({
+            "name": "HRV Trend",
+            "years_delta": delta,
+            "score_pct": ((h / 60.0) * 100.0).clamp(0.0, 100.0) as i32
+        }));
+    }
+    if let Some(s) = stress_avg {
+        factors.push(serde_json::json!({
+            "name": "Stress Recovery",
+            "years_delta": score_delta(100.0 - s, 70.0, 20.0),
+            "score_pct": (100.0 - s).clamp(0.0, 100.0) as i32
+        }));
+    }
+    if let Some(r) = resting_hr {
+        factors.push(serde_json::json!({
+            "name": "Resting HR",
+            "years_delta": score_delta(100.0 - r, 45.0, 20.0),
+            "score_pct": ((100.0 - r) / 50.0 * 100.0).clamp(0.0, 100.0) as i32
+        }));
+    }
+
+    // Aging rate: ratio of expected to ideal. 1.0 = on pace, <1 = younger.
+    let total_delta: f64 = factors.iter()
+        .filter_map(|f| f["years_delta"].as_f64())
+        .sum();
+    let aging_rate = (1.0 + total_delta / 25.0).clamp(0.6, 1.4);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "contributing_factors": factors,
+            "aging_rate": (aging_rate * 100.0).round() / 100.0,
+            "trend_30d": []
+        }
+    })))
+}
+
 // ═══ BP UNIT TESTS ═══
 // Pure-function coverage for tier classification and the read-through estimate.
 // Integration tests that hit Postgres live in `tests/` and require a live DB.
