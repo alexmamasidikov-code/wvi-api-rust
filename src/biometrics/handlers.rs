@@ -1644,6 +1644,114 @@ pub async fn get_bio_age_detail(user: AuthUser, State(pool): State<PgPool>) -> A
     })))
 }
 
+/// GET /biometrics/hrv-detail
+///
+/// Expanded HRV fields for the detail screen. Prior to this iOS fell back
+/// to the single `rmssd` value from /hrv; clinicians want sdnn, lnrmssd,
+/// and pnn50 too. Values are 7-day averages so the tile doesn't flicker
+/// on single-reading outliers.
+pub async fn get_hrv_detail(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let row: Option<(Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
+        r#"SELECT AVG(rmssd)::float8,
+                  AVG(sdnn)::float8,
+                  AVG(NULLIF(LN(NULLIF(rmssd, 0)), 'NaN'::float8))::float8,
+                  AVG(pnn50)::float8
+           FROM hrv
+           WHERE user_id = $1 AND timestamp > NOW() - INTERVAL '7 days'"#
+    ).bind(uid).fetch_optional(&pool).await?;
+    let (rmssd, sdnn, lnrmssd, pnn50) = row.unwrap_or((None, None, None, None));
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "rmssd": rmssd,
+            "sdnn": sdnn,
+            "lnrmssd": lnrmssd,
+            "pnn50": pnn50,
+        }
+    })))
+}
+
+/// GET /biometrics/recovery-detail
+///
+/// 7-day recovery trend + latest respiratory rate for the Recovery detail
+/// card. Trend is the last 7 days of `recovery_score` integers; rr is
+/// sampled from breathing_rate by day baseline.
+pub async fn get_recovery_detail(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let trend: Vec<Option<i32>> = sqlx::query_scalar(
+        r#"SELECT AVG(recovery_score)::int4
+           FROM hrv
+           WHERE user_id = $1 AND recovery_score IS NOT NULL AND timestamp > NOW() - INTERVAL '7 days'
+           GROUP BY timestamp::date
+           ORDER BY timestamp::date ASC
+           LIMIT 7"#
+    ).bind(uid).fetch_all(&pool).await.unwrap_or_default();
+    let trend_7d: Vec<i32> = trend.into_iter().flatten().collect();
+
+    let rr: Option<f64> = sqlx::query_scalar(
+        r#"SELECT AVG(breathing_rate)::float8
+           FROM hrv
+           WHERE user_id = $1 AND breathing_rate IS NOT NULL AND timestamp > NOW() - INTERVAL '24 hours'"#
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(None);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "trend_7d": trend_7d,
+            "respiratory_rate": rr,
+        }
+    })))
+}
+
+/// GET /biometrics/calories-detail
+///
+/// Active + BMR + total + goal for today, plus an empty by_activity list
+/// (activity-type split is populated from the activities module elsewhere;
+/// returned here as [] to match iOS DTO without blocking on that work).
+pub async fn get_calories_detail(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let active: Option<i64> = sqlx::query_scalar(
+        r#"SELECT SUM(calories)::int8 FROM activities
+           WHERE user_id = $1 AND start_time::date = NOW()::date"#
+    ).bind(uid).fetch_one(&pool).await.unwrap_or(None);
+    // Simple BMR: 1500 kcal fallback when no profile height/weight. Refinement
+    // TBD once profile data is required upstream.
+    let bmr: i32 = 1500;
+    let active_i = active.unwrap_or(0) as i32;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "active": active_i,
+            "bmr": bmr,
+            "total": active_i + bmr,
+            "goal": 2200,
+            "by_activity": [],
+        }
+    })))
+}
+
+/// GET /biometrics/vo2-detail
+///
+/// Last 4 months of VO2max monthly averages. iOS shows this as the 4-bar
+/// trend beneath the detail hero.
+pub async fn get_vo2_detail(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let uid = get_user_uuid(&pool, &user.privy_did).await?;
+    let monthly: Vec<Option<f64>> = sqlx::query_scalar(
+        r#"SELECT AVG(vo2_max)::float8
+           FROM hrv
+           WHERE user_id = $1 AND vo2_max IS NOT NULL AND timestamp > NOW() - INTERVAL '4 months'
+           GROUP BY DATE_TRUNC('month', timestamp)
+           ORDER BY DATE_TRUNC('month', timestamp) ASC
+           LIMIT 4"#
+    ).bind(uid).fetch_all(&pool).await.unwrap_or_default();
+    let trend_monthly: Vec<f64> = monthly.into_iter().flatten().collect();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "trend_monthly": trend_monthly }
+    })))
+}
+
 // ═══ BP UNIT TESTS ═══
 // Pure-function coverage for tier classification and the read-through estimate.
 // Integration tests that hit Postgres live in `tests/` and require a live DB.

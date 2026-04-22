@@ -45,6 +45,30 @@ pub async fn get_distribution(user: AuthUser, State(pool): State<PgPool>) -> App
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
+/// GET /emotions/today-hourly — dominant emotion per hour of the current day
+///
+/// Returns `hourly: [{hour, label}]` — one row per hour bucket that had
+/// at least one emotion sample today. Skipped hours are simply absent;
+/// the iOS consumer fills gaps with `.rest`.
+pub async fn get_today_hourly(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    // For each hour today, pick the most-frequent primary_emotion as the
+    // bucket label. DISTINCT ON keeps the winning row per hour.
+    let rows = sqlx::query_as::<_, (i32, String)>(
+        r#"SELECT DISTINCT ON (hour) hour, primary_emotion FROM (
+              SELECT EXTRACT(HOUR FROM timestamp)::int4 AS hour,
+                     primary_emotion,
+                     COUNT(*) AS cnt
+              FROM emotions
+              WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+                AND timestamp::date = NOW()::date
+              GROUP BY hour, primary_emotion
+           ) t
+           ORDER BY hour, cnt DESC"#
+    ).bind(&user.privy_did).fetch_all(&pool).await?;
+    let hourly: Vec<serde_json::Value> = rows.into_iter().map(|(h, l)| serde_json::json!({ "hour": h, "label": l })).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": { "hourly": hourly } })))
+}
+
 /// GET /emotions/heatmap — emotion by hour of day
 pub async fn get_heatmap(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     let rows = sqlx::query_as::<_, (f64, String, i64)>(

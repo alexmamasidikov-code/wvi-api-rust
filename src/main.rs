@@ -272,6 +272,10 @@ async fn async_main() {
         .route("/api/v1/biometrics/recovery", get(biometrics::handlers::get_recovery))
         .route("/api/v1/biometrics/cardio-summary", get(biometrics::handlers::get_cardio_summary))
         .route("/api/v1/biometrics/bio-age-detail", get(biometrics::handlers::get_bio_age_detail))
+        .route("/api/v1/biometrics/hrv-detail", get(biometrics::handlers::get_hrv_detail))
+        .route("/api/v1/biometrics/recovery-detail", get(biometrics::handlers::get_recovery_detail))
+        .route("/api/v1/biometrics/calories-detail", get(biometrics::handlers::get_calories_detail))
+        .route("/api/v1/biometrics/vo2-detail", get(biometrics::handlers::get_vo2_detail))
         .route("/api/v1/biometrics/realtime", get(biometrics::handlers::get_realtime))
         .route("/api/v1/biometrics/summary", get(biometrics::handlers::get_summary))
 
@@ -300,6 +304,7 @@ async fn async_main() {
         .route("/api/v1/emotions/wellbeing", get(emotions::handlers::get_wellbeing))
         .route("/api/v1/emotions/distribution", get(emotions::handlers::get_distribution))
         .route("/api/v1/emotions/heatmap", get(emotions::handlers::get_heatmap))
+        .route("/api/v1/emotions/today-hourly", get(emotions::handlers::get_today_hourly))
         .route("/api/v1/emotions/transitions", get(emotions::handlers::get_transitions))
         .route("/api/v1/emotions/triggers", get(emotions::handlers::get_triggers))
         .route("/api/v1/emotions/streaks", get(emotions::handlers::get_streaks))
