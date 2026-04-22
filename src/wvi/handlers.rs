@@ -293,9 +293,38 @@ pub async fn backfill(user: AuthUser, State(pool): State<PgPool>) -> AppResult<J
 }
 
 /// GET /wvi/history
+/// When `granularity=daily` is requested, the handler returns one row per
+/// calendar day (AVG(wvi_score) anchored at noon-UTC). Without that hint
+/// the raw per-second history is still returned, capped at 1000 rows DESC
+/// — which truncates multi-day windows to a single recent day. The new
+/// client defaults to `granularity=daily` for HOME / streak fetches.
 pub async fn get_history(user: AuthUser, State(pool): State<PgPool>, Query(q): Query<WVIHistoryQuery>) -> AppResult<Json<serde_json::Value>> {
     let from = q.from.unwrap_or_else(|| Utc::now() - Duration::days(7));
     let to = q.to.unwrap_or_else(Utc::now);
+
+    if q.granularity.as_deref() == Some("daily") {
+        let rows = sqlx::query_as::<_, (chrono::NaiveDate, f64)>(
+            r#"
+            SELECT timestamp::date AS day, AVG(wvi_score)::float8 AS avg_score
+            FROM wvi_scores
+            WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+              AND timestamp BETWEEN $2 AND $3
+            GROUP BY day
+            ORDER BY day ASC
+            LIMIT 365
+            "#
+        ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
+        let data: Vec<serde_json::Value> = rows.into_iter().map(|(day, avg)| {
+            let ts = day.and_hms_opt(12, 0, 0).unwrap().and_utc();
+            serde_json::json!({
+                "timestamp": ts,
+                "wviScore": (avg * 10.0).round() / 10.0,
+                "level": ""
+            })
+        }).collect();
+        return Ok(Json(serde_json::json!({ "success": true, "data": data })));
+    }
+
     let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, f32, String, serde_json::Value)>(
         "SELECT timestamp, wvi_score, level, metrics FROM wvi_scores WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC LIMIT 1000"
     ).bind(&user.privy_did).bind(from).bind(to).fetch_all(&pool).await?;
@@ -303,6 +332,26 @@ pub async fn get_history(user: AuthUser, State(pool): State<PgPool>, Query(q): Q
         "timestamp": r.0, "wviScore": r.1, "level": r.2, "metrics": r.3
     })).collect();
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
+}
+
+/// GET /wvi/streak — cheap day-count endpoint for the HOME streak pill.
+pub async fn get_streak(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    let row: Option<(i64, Option<chrono::NaiveDate>, Option<chrono::NaiveDate>)> = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(DISTINCT timestamp::date)::bigint AS days,
+            MIN(timestamp::date) AS first_day,
+            MAX(timestamp::date) AS last_day
+        FROM wvi_scores
+        WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+          AND timestamp > NOW() - INTERVAL '365 days'
+        "#
+    ).bind(&user.privy_did).fetch_optional(&pool).await?;
+    let (days, first, last) = row.unwrap_or((0, None, None));
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "days": days, "first_day": first, "last_day": last }
+    })))
 }
 
 /// GET /wvi/trends
