@@ -9,7 +9,10 @@ use std::convert::Infallible;
 use crate::auth::middleware::AuthUser;
 use crate::cache::AppCache;
 use crate::error::AppResult;
-use super::cli::{ask_or_fallback, invoke_claude_cli_streaming, AiEndpointKind};
+use super::cli::{
+    ask_or_fallback, invoke_ai_chat_with_context, invoke_ai_kind, invoke_claude_cli_streaming,
+    AiEndpointKind,
+};
 use super::context_builder::build_full_context;
 use super::prompt_rules::WELLEX_SYSTEM_PROMPT;
 
@@ -197,6 +200,83 @@ fn format_biometric_context(ctx: &BiometricContext) -> String {
 // falls back to per-endpoint static text if the CLI is unavailable.
 // See `super::cli` module for the CLI wrapper.
 
+/// Build the full biometric + computed context string used as the
+/// `biometrics` Mustache variable for /v1/kind/wvi.* templates.
+pub(crate) async fn build_biometrics_block(pool: &PgPool, privy_did: &str) -> String {
+    let db_context = build_full_context(pool, privy_did).await;
+
+    let ctx = fetch_biometrics(pool, privy_did).await;
+    let heart_rate = ctx.heart_rate.unwrap_or(70.0) as f64;
+    let hrv = ctx.hrv_rmssd.unwrap_or(50.0) as f64;
+    let spo2 = ctx.spo2.unwrap_or(98.0) as f64;
+    let steps = ctx.steps.unwrap_or(0) as f64;
+
+    let (sys, dia) = crate::biometrics::computed::estimate_blood_pressure(heart_rate, hrv);
+    let vo2 = crate::biometrics::computed::estimate_vo2_max(heart_rate, 30.0);
+    let coherence = crate::biometrics::computed::compute_coherence(hrv);
+    let bio_age = crate::biometrics::computed::compute_bio_age(30.0, heart_rate, hrv, spo2, steps, 75.0);
+
+    let mut computed = vec!["### Computed estimates".to_string()];
+    computed.push(format!("- Estimated BP: **{:.0}/{:.0} mmHg**", sys, dia));
+    computed.push(format!("- Estimated VO2 Max: **{:.1} ml/kg/min**", vo2));
+    computed.push(format!("- Cardiac Coherence: **{:.0}%**", coherence));
+    computed.push(format!("- Estimated Bio Age: **{:.0} years**", bio_age));
+
+    format!("{}\n\n{}", db_context, computed.join("\n"))
+}
+
+/// Canonical AI handler path: build biometric context, call the named prompt
+/// template on the gateway (`/v1/kind/<template>`), fall back to the legacy
+/// `call_claude` CLI path on gateway error, fall back to static text last.
+pub(crate) async fn call_kind(
+    pool: &PgPool,
+    privy_did: &str,
+    kind: AiEndpointKind,
+    template: &str,
+    extra_vars: serde_json::Value,
+) -> String {
+    let biometrics = build_biometrics_block(pool, privy_did).await;
+    let mut vars = match extra_vars {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    vars.insert("biometrics".to_string(), serde_json::Value::String(biometrics));
+
+    match invoke_ai_kind(template, serde_json::Value::Object(vars)).await {
+        Ok(text) => text,
+        Err(reason) => {
+            tracing::warn!(endpoint = ?kind, template, reason = %reason, "kind call failed, using fallback");
+            kind.fallback_text().to_string()
+        }
+    }
+}
+
+/// Same as `call_kind` but wrapped in AppCache (10-minute TTL). Used by
+/// cache-friendly panels (daily_brief, body_story, weekly_deep, recovery_deep,
+/// full_analysis, ecg_interpret narrative, evening_review).
+pub(crate) async fn cached_kind_call(
+    cache: &AppCache,
+    pool: &PgPool,
+    privy_did: &str,
+    kind: AiEndpointKind,
+    template: &str,
+    extra_vars: serde_json::Value,
+) -> String {
+    let key = cache_key(privy_did, kind);
+    if let Some(hit) = cache.get_ai(&key).await {
+        if let Some(m) = crate::metrics::global() {
+            m.ai_cache_hits.inc();
+        }
+        return hit;
+    }
+    if let Some(m) = crate::metrics::global() {
+        m.ai_cache_misses.inc();
+    }
+    let text = call_kind(pool, privy_did, kind, template, extra_vars).await;
+    cache.set_ai(&key, text.clone()).await;
+    text
+}
+
 pub(crate) async fn call_claude(pool: &PgPool, privy_did: &str, kind: AiEndpointKind, prompt: &str) -> String {
     // Rich multi-day DB context — 7-day averages + sleep history + WVI
     // trend + emotion distribution. Claude makes much better calls with
@@ -239,8 +319,7 @@ pub async fn interpret(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Analyze ALL the biometric data above. For each metric, explain: 1) What the current value means 2) Whether it's in a healthy range 3) How it relates to other metrics. Start with the most important finding. Reference specific numbers.";
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Interpret, prompt).await;
+    let text = call_kind(&pool, &user.privy_did, AiEndpointKind::Interpret, "wvi.interpret", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -249,8 +328,7 @@ pub async fn recommendations(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Based on ALL the biometric data, provide exactly 3 personalized recommendations. Each must: 1) Reference a specific metric value 2) Give a concrete action (not vague advice) 3) Explain the expected benefit. Format: numbered list with bold action.";
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Recommendations, prompt).await;
+    let text = call_kind(&pool, &user.privy_did, AiEndpointKind::Recommendations, "wvi.recommendations", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -264,11 +342,14 @@ pub async fn chat(
         .and_then(|v| v.as_str())
         .unwrap_or("Tell me about my health.")
         .to_string();
-    let prompt = format!(
-        "The user asks: \"{}\"\n\nAnswer using the biometric context above to give a personalized, helpful response.",
-        user_message
-    );
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Chat, &prompt).await;
+    let text = call_kind(
+        &pool,
+        &user.privy_did,
+        AiEndpointKind::Chat,
+        "wvi.chat",
+        serde_json::json!({ "message": user_message }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -335,11 +416,14 @@ pub async fn explain_metric(
         .and_then(|v| v.as_str())
         .unwrap_or("heart rate")
         .to_string();
-    let prompt = format!(
-        "Explain the '{}' metric in the context of the biometric data above. What does the current value mean, what is optimal, and what affects it?",
-        metric
-    );
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::ExplainMetric, &prompt).await;
+    let text = call_kind(
+        &pool,
+        &user.privy_did,
+        AiEndpointKind::ExplainMetric,
+        "wvi.explain_metric",
+        serde_json::json!({ "metric": metric }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -348,8 +432,7 @@ pub async fn action_plan(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Create a personalized daily wellness plan based on the biometric data. Structure as:\n• MORNING (based on recovery/HRV): exercise type + duration\n• AFTERNOON (based on stress/activity): activity suggestion\n• EVENING (based on overall state): wind-down routine\nReference specific metric values to justify each suggestion.";
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::ActionPlan, prompt).await;
+    let text = call_kind(&pool, &user.privy_did, AiEndpointKind::ActionPlan, "wvi.action_plan", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -358,8 +441,7 @@ pub async fn insights(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "Identify the TOP 3 most significant findings from the biometric data. For each: 1) What you found (with specific numbers) 2) Why it matters 3) What to do about it. Prioritize by health impact. Use bullet points.";
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::Insights, prompt).await;
+    let text = call_kind(&pool, &user.privy_did, AiEndpointKind::Insights, "wvi.insights", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -368,8 +450,7 @@ pub async fn genius_layer(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let prompt = "You are the Genius Layer — provide the deepest analysis possible. Connect ALL signals:\n1) How HR + HRV + Stress interact (autonomic nervous system state)\n2) How SpO2 + Temperature + Activity relate (metabolic state)\n3) How Emotional state connects to physiological data\n4) What the WVI score + Bio Age reveal about long-term trajectory\n5) One non-obvious insight that connects 3+ metrics\nBe specific with numbers. This is the premium analysis.";
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::GeniusLayer, prompt).await;
+    let text = call_kind(&pool, &user.privy_did, AiEndpointKind::GeniusLayer, "wvi.genius_layer", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -389,7 +470,7 @@ pub async fn daily_brief(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::DailyBrief, DAILY_BRIEF_PROMPT).await;
+    let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::DailyBrief, "wvi.daily_brief", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -406,7 +487,7 @@ pub async fn body_story(
     Extension(cache): Extension<AppCache>,
     State(pool): State<PgPool>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::BodyStory, BODY_STORY_PROMPT).await;
+    let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::BodyStory, "wvi.body_story", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -423,7 +504,7 @@ pub async fn evening_review(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::EveningReview, EVENING_REVIEW_PROMPT).await;
+    let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::EveningReview, "wvi.evening_review", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -432,17 +513,21 @@ pub async fn anomaly_alert(
     State(pool): State<PgPool>,
     Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let metric = body.get("metric").and_then(|v| v.as_str()).unwrap_or("a biometric signal");
-    let direction = body.get("direction").and_then(|v| v.as_str()).unwrap_or("shifted");
-    let delta = body.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let prompt = format!(
-        "A significant change was detected: **{}** {} by {:.1}% vs the user's 7-day baseline. \
-        Write a 2-sentence push-notification body (max 140 chars): \
-        explain what this likely means physiologically + one immediate action. \
-        No emoji. No alarmism. If the change is within normal daily variation, say so briefly.",
-        metric, direction, delta.abs()
-    );
-    let text = call_claude(&pool, &user.privy_did, AiEndpointKind::AnomalyAlert, &prompt).await;
+    let metric = body.get("metric").and_then(|v| v.as_str()).unwrap_or("a biometric signal").to_string();
+    let direction = body.get("direction").and_then(|v| v.as_str()).unwrap_or("shifted").to_string();
+    let delta = body.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0).abs();
+    let text = call_kind(
+        &pool,
+        &user.privy_did,
+        AiEndpointKind::AnomalyAlert,
+        "wvi.anomaly_alert",
+        serde_json::json!({
+            "metric": metric,
+            "direction": direction,
+            "delta_pct": format!("{:.1}", delta),
+        }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -460,7 +545,7 @@ pub async fn weekly_deep(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::WeeklyDeep, WEEKLY_DEEP_PROMPT).await;
+    let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::WeeklyDeep, "wvi.weekly_deep", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -489,7 +574,7 @@ pub async fn full_analysis(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::FullAnalysis, FULL_ANALYSIS_PROMPT).await;
+    let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::FullAnalysis, "wvi.full_analysis", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }
 
@@ -537,8 +622,8 @@ pub async fn ecg_interpret(
     let body: ECGInterpretBody = serde_json::from_value(body).unwrap_or_default();
 
     let Some(samples) = body.samples else {
-        // Legacy fall-through path — unchanged behaviour.
-        let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::EcgInterpret, ECG_INTERPRET_PROMPT).await;
+        // Legacy fall-through path — switched to /v1/kind/wvi.ecg_interpret.
+        let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::EcgInterpret, "wvi.ecg_interpret", serde_json::json!({})).await;
         return Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })));
     };
 
@@ -725,6 +810,6 @@ pub async fn recovery_deep(
     State(pool): State<PgPool>,
     Json(_body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let text = cached_call(&cache, &pool, &user.privy_did, AiEndpointKind::RecoveryDeep, RECOVERY_DEEP_PROMPT).await;
+    let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::RecoveryDeep, "wvi.recovery_deep", serde_json::json!({})).await;
     Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })))
 }

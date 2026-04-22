@@ -421,6 +421,109 @@ static GATEWAY_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("reqwest client build")
 });
 
+fn gateway_creds() -> Result<(String, String), String> {
+    let url = std::env::var("AI_GATEWAY_URL")
+        .map_err(|_| "AI_GATEWAY_URL not set".to_string())?;
+    let key = std::env::var("AI_GATEWAY_INTERNAL_KEY")
+        .map_err(|_| "AI_GATEWAY_INTERNAL_KEY not set".to_string())?;
+    Ok((url.trim_end_matches('/').to_string(), key))
+}
+
+fn extract_message_text(v: &serde_json::Value) -> String {
+    v.pointer("/choices/0/message/content")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Call a named prompt `kind` registered on the gateway (POST /v1/kind/:name).
+/// The gateway loads the template from `src/prompts/<kind>.md`, injects RAG
+/// context if the template declares a `namespace:`, and runs the LLM.
+///
+/// `variables` is a JSON object substituted into Mustache `{{vars}}`.
+pub async fn invoke_ai_kind(
+    kind: &str,
+    variables: serde_json::Value,
+) -> Result<String, String> {
+    let (url, key) = gateway_creds()?;
+
+    let resp = GATEWAY_CLIENT
+        .post(format!("{}/v1/kind/{}", url, kind))
+        .header("X-Internal-Key", key)
+        .json(&serde_json::json!({ "variables": variables }))
+        .send()
+        .await
+        .map_err(|e| format!("gateway kind request: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "gateway kind/{} {}: {}",
+            kind,
+            status.as_u16(),
+            body.chars().take(500).collect::<String>()
+        ));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("gateway kind response decode: {e}"))?;
+    let text = extract_message_text(&json);
+    if text.is_empty() {
+        return Err(format!("gateway kind/{}: empty content", kind));
+    }
+    Ok(text)
+}
+
+/// Retrieval-augmented chat against a namespace. Gateway embeds the query,
+/// pulls top-K hits, injects as context, then runs the LLM with a default
+/// Wellex system prompt.
+pub async fn invoke_ai_chat_with_context(
+    namespace: &str,
+    query: &str,
+    system: Option<&str>,
+    top_k: Option<u32>,
+) -> Result<String, String> {
+    let (url, key) = gateway_creds()?;
+
+    let mut body = serde_json::json!({
+        "namespace": namespace,
+        "query": query,
+        "topK": top_k.unwrap_or(6),
+    });
+    if let Some(s) = system {
+        body["system"] = serde_json::Value::String(s.to_string());
+    }
+
+    let resp = GATEWAY_CLIENT
+        .post(format!("{}/v1/chat-with-context", url))
+        .header("X-Internal-Key", key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("gateway chat-with-context request: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "gateway chat-with-context/{} {}: {}",
+            namespace,
+            status.as_u16(),
+            body.chars().take(500).collect::<String>()
+        ));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+    let text = extract_message_text(&json);
+    if text.is_empty() {
+        return Err(format!("gateway chat-with-context/{}: empty content", namespace));
+    }
+    Ok(text)
+}
+
 /// POST the prompt to the Wellex AI gateway (`AI_GATEWAY_URL`). The gateway
 /// decides which provider (Kimi / MiniMax) serves the call.
 ///
