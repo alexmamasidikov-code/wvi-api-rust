@@ -12,6 +12,7 @@
 | Rust API | `wellex-io/app-backend` (branch `main`) | `/Users/alexander/Code/wvi-api-rust` | `alexmamasidikov-code/wvi-api-rust` → remote `archive` |
 | iOS app (monorepo layout) | `wellex-io/app-frontend` (branch `main`, code under `iOS/`) | `/Users/alexander/Code/wellex-app-frontend` (monorepo clone) | — |
 | iOS primary dev repo (flat Xcode layout) | `alexmamasidikov-code/wvi-health-ios` | `/Users/alexander/Code/WVIHealth` | mirrored to wellex-io via script |
+| AI gateway + RAG | `wellex-io/ai-server` (branch `main`) | `/Users/alexander/Code/wellex-ai-server` | — |
 
 **Backend push:**
 ```bash
@@ -129,6 +130,8 @@ iOS → wviapi.wellex.io verified (AppConfig.productionURL)
 ## Known next-up items (not urgent)
 
 - Local AI model plan — `/Users/alexander/Code/wvi-api-rust/docs/AI_MODEL_PLAN.md`. Phase 1 = Moonshot Kimi K2 API integration (replace `claude` CLI shell-out in `src/ai/cli.rs`). Server has no GPU → cannot run Kimi/MiniMax locally in full size.
+- **AI + RAG design (WIP) — `/Users/alexander/Code/wellex-ai-server/docs/AI_RAG_DESIGN.md`** (canonical) — also mirrored in `/Users/alexander/Code/wvi-api-rust/docs/AI_RAG_DESIGN.md` for historical reasons. Shared `aidev.wellex.io` gateway. Kimi Code CLI via subscription, MiniMax pending key. RAG on existing Qdrant with BGE-M3 local embeddings. Per-user namespaces. Contains open questions + phased plan. Lock decisions there before Phase 1 start.
+- **AI server repo**: `wellex-io/ai-server` → `/Users/alexander/Code/wellex-ai-server`. Cleanly separated from app-backend. Phase 1 (gateway container + Kimi Code CLI) will land here, not in wvi-api-rust.
 - 3 unit-test files (`OnboardingCoordinatorTests.swift`, `OrderStoreTests.swift`, `NPSStoreTests.swift`) already in WVIHealthTests + wired through `project.yml` + passing (29/29 ✓).
 - ATT prompt implemented (`Core/Privacy/ConsentManager.swift → AppTrackingManager.requestIfNeeded()` called from `afterSignIn`).
 - Sentry SDK 8.58 → 9.10 is a major bump (breaking breadcrumb API) — deferred.
