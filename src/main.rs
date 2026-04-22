@@ -28,6 +28,7 @@ mod push;
 mod intraday;
 mod alarms;
 mod reminders;
+mod nps;
 mod sensitivity;
 mod stress;
 mod narrator_schedule;
@@ -305,6 +306,11 @@ async fn async_main() {
         .route("/api/v1/emotions/distribution", get(emotions::handlers::get_distribution))
         .route("/api/v1/emotions/heatmap", get(emotions::handlers::get_heatmap))
         .route("/api/v1/emotions/today-hourly", get(emotions::handlers::get_today_hourly))
+
+        // ═══ NPS / Rescue / Referral (3) ═══
+        .route("/api/v1/nps/submit", post(nps::handlers::submit))
+        .route("/api/v1/rescue/submit", post(nps::handlers::rescue_submit))
+        .route("/api/v1/referrals/track", post(nps::handlers::referral_track))
         .route("/api/v1/emotions/transitions", get(emotions::handlers::get_transitions))
         .route("/api/v1/emotions/triggers", get(emotions::handlers::get_triggers))
         .route("/api/v1/emotions/streaks", get(emotions::handlers::get_streaks))
