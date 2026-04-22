@@ -10,8 +10,7 @@ use crate::auth::middleware::AuthUser;
 use crate::cache::AppCache;
 use crate::error::AppResult;
 use super::cli::{
-    ask_or_fallback, invoke_ai_chat_with_context, invoke_ai_kind, invoke_claude_cli_streaming,
-    AiEndpointKind,
+    ask_or_fallback, invoke_ai_kind, invoke_claude_cli_streaming, AiEndpointKind,
 };
 use super::context_builder::build_full_context;
 use super::prompt_rules::WELLEX_SYSTEM_PROMPT;
@@ -55,6 +54,42 @@ pub(crate) async fn cached_call(
     let text = call_claude(pool, privy_did, kind, prompt).await;
     cache.set_ai(&key, text.clone()).await;
     text
+}
+
+/// Fetch the latest ECG session summary for this user and format as a short
+/// text block for the wvi.ecg_interpret template's {{ecg}} variable.
+/// Returns "No recent ECG recording" if none found — the template's system
+/// prompt will then ask the user to take a fresh 60 s measurement.
+async fn fetch_latest_ecg_summary(pool: &PgPool, privy_did: &str) -> String {
+    let row = sqlx::query_as::<_, (Option<i32>, Option<i32>, Option<serde_json::Value>, Option<chrono::NaiveDateTime>)>(
+        "SELECT duration_seconds, sample_rate, analysis_json, recorded_at
+         FROM ecg
+         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+         ORDER BY recorded_at DESC LIMIT 1"
+    )
+    .bind(privy_did)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((dur_s, rate, analysis, recorded)) = row else {
+        return "No recent ECG recording.".to_string();
+    };
+
+    let when = recorded
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown time".to_string());
+    let dur = dur_s.map(|d| format!("{d} s")).unwrap_or_else(|| "—".to_string());
+    let rate_str = rate.map(|r| format!("{r} Hz")).unwrap_or_else(|| "—".to_string());
+    let analysis_str = match analysis {
+        Some(v) => serde_json::to_string(&v).unwrap_or_else(|_| "invalid JSON".to_string()),
+        None => "no analysis blob".to_string(),
+    };
+
+    format!(
+        "Recorded: {when} · Duration: {dur} · Sample rate: {rate_str}\nAnalysis: {analysis_str}"
+    )
 }
 
 // ─── Biometric context fetched from DB ───────────────────────────────────────
@@ -254,6 +289,16 @@ pub(crate) async fn call_kind(
 /// Same as `call_kind` but wrapped in AppCache (10-minute TTL). Used by
 /// cache-friendly panels (daily_brief, body_story, weekly_deep, recovery_deep,
 /// full_analysis, ecg_interpret narrative, evening_review).
+#[tracing::instrument(
+    name = "ai.cached_kind_call",
+    skip_all,
+    fields(
+        kind = kind.as_str(),
+        template,
+        user_hash = %format!("{:016x}", crate::ai::cli::hash_u64_public(privy_did)),
+        cache_hit = tracing::field::Empty,
+    )
+)]
 pub(crate) async fn cached_kind_call(
     cache: &AppCache,
     pool: &PgPool,
@@ -262,13 +307,16 @@ pub(crate) async fn cached_kind_call(
     template: &str,
     extra_vars: serde_json::Value,
 ) -> String {
+    let span = tracing::Span::current();
     let key = cache_key(privy_did, kind);
     if let Some(hit) = cache.get_ai(&key).await {
+        span.record("cache_hit", true);
         if let Some(m) = crate::metrics::global() {
             m.ai_cache_hits.inc();
         }
         return hit;
     }
+    span.record("cache_hit", false);
     if let Some(m) = crate::metrics::global() {
         m.ai_cache_misses.inc();
     }
@@ -622,8 +670,19 @@ pub async fn ecg_interpret(
     let body: ECGInterpretBody = serde_json::from_value(body).unwrap_or_default();
 
     let Some(samples) = body.samples else {
-        // Legacy fall-through path — switched to /v1/kind/wvi.ecg_interpret.
-        let text = cached_kind_call(&cache, &pool, &user.privy_did, AiEndpointKind::EcgInterpret, "wvi.ecg_interpret", serde_json::json!({})).await;
+        // Narrative mode — pull latest ECG analysis blob from DB so the template's
+        // {{ecg}} variable gets real data (rhythm, PPI coherence). Template
+        // instructs the model to suggest a fresh measurement if blob is absent.
+        let ecg_summary = fetch_latest_ecg_summary(&pool, &user.privy_did).await;
+        let text = cached_kind_call(
+            &cache,
+            &pool,
+            &user.privy_did,
+            AiEndpointKind::EcgInterpret,
+            "wvi.ecg_interpret",
+            serde_json::json!({ "ecg": ecg_summary }),
+        )
+        .await;
         return Ok(Json(serde_json::json!({ "success": true, "data": { "message": text } })));
     };
 

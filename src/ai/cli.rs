@@ -403,18 +403,30 @@ Output the JSON object now:"#
 /// span attribute so traces can be correlated across retries without leaking
 /// the full prompt text into the observability backend.
 fn prompt_hash_u64(prompt: &str) -> u64 {
+    hash_u64_public(prompt)
+}
+
+/// Public wrapper — same hash as prompt_hash_u64 but exposed so other modules
+/// (handlers.rs instrumentation) can obscure privy_did in tracing fields.
+pub fn hash_u64_public(s: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
-    prompt.hash(&mut h);
+    s.hash(&mut h);
     h.finish()
 }
+
+/// Gateway HTTP timeout. Shorter than `CLI_TIMEOUT` because the gateway
+/// itself caps provider calls at 90 s; wvi-api only needs to wait ~25 s
+/// before giving up and falling back. iOS client-side timeout (60 s) is
+/// well above this, so users see fallback text rather than gateway 502.
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Shared HTTP client for all gateway calls. Built once (keeps connection pool
 /// warm) — saves ~100 ms of TLS + TCP handshake per request.
 static GATEWAY_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .timeout(CLI_TIMEOUT)
+        .timeout(GATEWAY_TIMEOUT)
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(16)
         .build()
@@ -473,53 +485,6 @@ pub async fn invoke_ai_kind(
     let text = extract_message_text(&json);
     if text.is_empty() {
         return Err(format!("gateway kind/{}: empty content", kind));
-    }
-    Ok(text)
-}
-
-/// Retrieval-augmented chat against a namespace. Gateway embeds the query,
-/// pulls top-K hits, injects as context, then runs the LLM with a default
-/// Wellex system prompt.
-pub async fn invoke_ai_chat_with_context(
-    namespace: &str,
-    query: &str,
-    system: Option<&str>,
-    top_k: Option<u32>,
-) -> Result<String, String> {
-    let (url, key) = gateway_creds()?;
-
-    let mut body = serde_json::json!({
-        "namespace": namespace,
-        "query": query,
-        "topK": top_k.unwrap_or(6),
-    });
-    if let Some(s) = system {
-        body["system"] = serde_json::Value::String(s.to_string());
-    }
-
-    let resp = GATEWAY_CLIENT
-        .post(format!("{}/v1/chat-with-context", url))
-        .header("X-Internal-Key", key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("gateway chat-with-context request: {e}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "gateway chat-with-context/{} {}: {}",
-            namespace,
-            status.as_u16(),
-            body.chars().take(500).collect::<String>()
-        ));
-    }
-
-    let json: serde_json::Value = resp.json().await.map_err(|e| format!("decode: {e}"))?;
-    let text = extract_message_text(&json);
-    if text.is_empty() {
-        return Err(format!("gateway chat-with-context/{}: empty content", namespace));
     }
     Ok(text)
 }

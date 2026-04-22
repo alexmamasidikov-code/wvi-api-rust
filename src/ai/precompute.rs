@@ -20,20 +20,19 @@ use std::time::Duration;
 use crate::cache::AppCache;
 
 use super::cli::AiEndpointKind;
-use super::handlers::{
-    call_claude, cache_key, DAILY_BRIEF_PROMPT, ECG_INTERPRET_PROMPT, EVENING_REVIEW_PROMPT,
-    FULL_ANALYSIS_PROMPT, RECOVERY_DEEP_PROMPT, WEEKLY_DEEP_PROMPT,
-};
+use super::handlers::{cache_key, call_kind};
 
-/// Panels we keep warm. Chat/anomaly alerts are skipped — chat is per-message,
-/// anomaly alerts need trigger params at call time.
+/// Panels we keep warm — each tuple is (AiEndpointKind, gateway template name).
+/// Chat/anomaly alerts skipped: chat is per-message, anomaly alerts need
+/// trigger params at call time.
 const PANELS: &[(AiEndpointKind, &str)] = &[
-    (AiEndpointKind::DailyBrief, DAILY_BRIEF_PROMPT),
-    (AiEndpointKind::RecoveryDeep, RECOVERY_DEEP_PROMPT),
-    (AiEndpointKind::FullAnalysis, FULL_ANALYSIS_PROMPT),
-    (AiEndpointKind::EveningReview, EVENING_REVIEW_PROMPT),
-    (AiEndpointKind::WeeklyDeep, WEEKLY_DEEP_PROMPT),
-    (AiEndpointKind::EcgInterpret, ECG_INTERPRET_PROMPT),
+    (AiEndpointKind::DailyBrief, "wvi.daily_brief"),
+    (AiEndpointKind::RecoveryDeep, "wvi.recovery_deep"),
+    (AiEndpointKind::FullAnalysis, "wvi.full_analysis"),
+    (AiEndpointKind::EveningReview, "wvi.evening_review"),
+    (AiEndpointKind::WeeklyDeep, "wvi.weekly_deep"),
+    (AiEndpointKind::EcgInterpret, "wvi.ecg_interpret"),
+    (AiEndpointKind::BodyStory, "wvi.body_story"),
 ];
 
 /// Refresh interval. 5 min balances freshness (new biometrics show up
@@ -71,11 +70,14 @@ async fn prewarm_once(pool: &PgPool, cache: &AppCache) -> Result<(), sqlx::Error
     );
 
     for privy_did in users {
-        for (kind, prompt) in PANELS {
+        for (kind, template) in PANELS {
             // Generate even if there's an existing cached value — the point
             // of the prewarmer is to keep the response current relative to
             // fresh biometrics. Write overrides the previous entry.
-            let text = call_claude(pool, &privy_did, *kind, prompt).await;
+            //
+            // Uses call_kind (same path as live handlers) so prewarmed and
+            // on-demand responses go through identical template + RAG pipeline.
+            let text = call_kind(pool, &privy_did, *kind, template, serde_json::json!({})).await;
             cache.set_ai(&cache_key(&privy_did, *kind), text).await;
         }
     }
