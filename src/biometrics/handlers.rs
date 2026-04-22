@@ -1539,8 +1539,11 @@ pub async fn sync(user: AuthUser, State(pool): State<PgPool>, Extension(event_bu
 pub async fn get_cardio_summary(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
 
+    // `heart_rate.bpm` is `REAL` in the TimescaleDB schema. Explicit
+    // `::int4` cast lets us decode straight into `Option<i32>` without
+    // needing a float → int conversion in application code.
     let hr: Option<i32> = sqlx::query_scalar(
-        "SELECT bpm FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
+        "SELECT bpm::int4 FROM heart_rate WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
     ).bind(uid).fetch_optional(&pool).await?;
 
     let hrv: Option<i32> = sqlx::query_scalar(
