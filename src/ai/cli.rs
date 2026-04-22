@@ -1,18 +1,15 @@
-//! Claude Code CLI invocation layer.
+//! AI invocation layer.
 //!
-//! Replaces the HTTP-based `call_claude` path with a local subprocess spawn
-//! of the `claude` CLI installed on the production VPS (Max subscription).
+//! Two paths, selected at call time:
+//! - `AI_GATEWAY_URL` env set → HTTP POST to aidev.wellex.io/v1/chat, which
+//!   routes the call through the shared Kimi subscription (and optionally
+//!   MiniMax). No subprocess, no per-service CLI — this is the canonical
+//!   path as of 2026-04-22.
+//! - Env absent → legacy `claude` CLI subprocess (transitional fallback so
+//!   local dev without the gateway still works).
 //!
-//! Design decisions (brainstorm 2026-04-17):
-//! - Direct subprocess spawn (no long-running daemon, no job queue) — simple,
-//!   predictable, good enough for current scale.
-//! - Stateless one-shot invocation — the Rust handler assembles the full
-//!   biometric context into the prompt on every call.
-//! - Bounded concurrency via tokio semaphore (max 5 concurrent CLI spawns)
-//!   to prevent OOM under burst traffic.
-//! - Cache: SHA256(prompt) → Redis/memory (10-min TTL, existing AI cache).
-//! - On timeout / CLI failure: return the per-endpoint static fallback text
-//!   so iOS never sees an error message to the end-user.
+//! Both paths ultimately go through `ask_or_fallback`, which guarantees the
+//! handler always gets a user-facing string (static fallback on any failure).
 
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -413,33 +410,98 @@ fn prompt_hash_u64(prompt: &str) -> u64 {
     h.finish()
 }
 
+/// POST the prompt to the Wellex AI gateway (`AI_GATEWAY_URL`). The gateway
+/// decides which provider (Kimi / MiniMax) serves the call.
+///
+/// Shape matches `/v1/chat` at aidev.wellex.io — OpenAI-ish body in, text
+/// extracted from `choices[0].message.content`.
+pub async fn invoke_ai_gateway(prompt: &str) -> Result<String, String> {
+    let url = std::env::var("AI_GATEWAY_URL")
+        .map_err(|_| "AI_GATEWAY_URL not set".to_string())?;
+    let key = std::env::var("AI_GATEWAY_INTERNAL_KEY")
+        .map_err(|_| "AI_GATEWAY_INTERNAL_KEY not set".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(CLI_TIMEOUT)
+        .build()
+        .map_err(|e| format!("gateway http client: {e}"))?;
+
+    let body = serde_json::json!({
+        "messages": [{ "role": "user", "content": prompt }],
+    });
+
+    let resp = client
+        .post(format!("{}/v1/chat", url.trim_end_matches('/')))
+        .header("X-Internal-Key", key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("gateway request: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "gateway {}: {}",
+            status.as_u16(),
+            body.chars().take(500).collect::<String>()
+        ));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("gateway response decode: {e}"))?;
+
+    let text = json
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    if text.is_empty() {
+        return Err("gateway returned empty content".to_string());
+    }
+    Ok(text)
+}
+
 /// Full-context invoke: takes the per-endpoint kind + the complete prompt
 /// (system + biometric context + user question) and returns either the
-/// Claude response or the static fallback text.
+/// upstream response or the static fallback text.
 ///
-/// This is the function the handlers should call — it never fails, it
-/// always returns a user-facing string.
+/// Route preference: gateway → legacy CLI. On any failure falls back to
+/// `AiEndpointKind::fallback_text()` so iOS never sees a raw error.
 #[tracing::instrument(
-    name = "ai.claude.invoke",
+    name = "ai.invoke",
     skip_all,
     fields(
         prompt.kind = kind.as_str(),
         prompt.hash = %format!("{:016x}", prompt_hash_u64(prompt)),
         prompt.bytes = prompt.len(),
+        ai.route = tracing::field::Empty,
         response.cached = false,
         response.ok = tracing::field::Empty,
     )
 )]
 pub async fn ask_or_fallback(kind: AiEndpointKind, prompt: &str) -> String {
     let span = tracing::Span::current();
-    match invoke_claude_cli(prompt).await {
+    let use_gateway = std::env::var("AI_GATEWAY_URL").is_ok();
+    span.record("ai.route", if use_gateway { "gateway" } else { "claude_cli" });
+
+    let result = if use_gateway {
+        invoke_ai_gateway(prompt).await
+    } else {
+        invoke_claude_cli(prompt).await
+    };
+
+    match result {
         Ok(response) => {
             span.record("response.ok", true);
             response
         }
         Err(reason) => {
             span.record("response.ok", false);
-            tracing::warn!(endpoint = ?kind, reason = %reason, "claude CLI unavailable, returning static fallback");
+            tracing::warn!(endpoint = ?kind, reason = %reason, "AI path failed, returning static fallback");
             kind.fallback_text().to_string()
         }
     }
