@@ -1,337 +1,325 @@
-# WVI API — Wellness Vitality Index
+# Wellex API
 
-High-performance Rust backend for the Wellex WVI health scoring platform.
+**Production-grade Rust backend for the Wellex health platform.**
 
-Built with **Axum** + **Tokio** + **SQLx** + **PostgreSQL**.
-
-## Architecture
-
-```
-115 API endpoints | 17 modules | 18 emotions | 64 activity types | 10 WVI metrics
-```
-
-### Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Language | Rust 1.94+ |
-| Framework | Axum 0.8 |
-| Runtime | Tokio (async) |
-| Database | PostgreSQL + SQLx |
-| Auth | JWT (jsonwebtoken) + Argon2 |
-| AI | Claude API (reqwest) |
-| Docs | OpenAPI 3.1 (utoipa) |
-
-## Quick Start
-
-```bash
-# Prerequisites: Rust, PostgreSQL
-
-# Clone
-git clone https://github.com/alexmamasidikov-code/wvi-api-rust.git
-cd wvi-api-rust
-
-# Setup database
-createdb wvi
-cp .env.example .env
-# Edit .env with your DATABASE_URL
-
-# Run migrations & start
-cargo run
-# Server starts on http://localhost:8091
-```
-
-## API Endpoints (115 total)
-
-### Auth (3)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/auth/register` | Register new user |
-| POST | `/api/v1/auth/login` | Login with credentials |
-| POST | `/api/v1/auth/refresh` | Refresh access token |
-
-### Users (4)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/users/me` | Get current user profile |
-| PUT | `/api/v1/users/me` | Update user profile |
-| GET | `/api/v1/users/me/norms` | Get personal biometric baselines |
-| POST | `/api/v1/users/me/norms/calibrate` | Recalibrate personal norms |
-
-### Biometrics (18)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/biometrics/sync` | Bulk sync biometric data |
-| GET/POST | `/api/v1/biometrics/heart-rate` | Heart rate data |
-| GET/POST | `/api/v1/biometrics/hrv` | HRV + stress + blood pressure |
-| GET/POST | `/api/v1/biometrics/spo2` | Blood oxygen saturation |
-| GET/POST | `/api/v1/biometrics/temperature` | Body temperature |
-| GET/POST | `/api/v1/biometrics/sleep` | Sleep data |
-| GET/POST | `/api/v1/biometrics/ppi` | PPI intervals |
-| GET/POST | `/api/v1/biometrics/ecg` | ECG raw data |
-| GET/POST | `/api/v1/biometrics/activity` | Activity data |
-| GET | `/api/v1/biometrics/blood-pressure` | Blood pressure history |
-| GET | `/api/v1/biometrics/stress` | Stress history |
-| GET | `/api/v1/biometrics/breathing-rate` | Breathing rate |
-| GET | `/api/v1/biometrics/rmssd` | RMSSD (HRV metric) |
-| GET | `/api/v1/biometrics/coherence` | PPI coherence |
-| GET | `/api/v1/biometrics/realtime` | Real-time snapshot |
-| GET | `/api/v1/biometrics/summary` | Daily summary |
-
-### WVI — Wellness Vitality Index (10)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/wvi/current` | Current WVI score with breakdown |
-| GET | `/api/v1/wvi/history` | WVI history (time-series) |
-| GET | `/api/v1/wvi/trends` | Trend analysis (7d/30d) |
-| GET | `/api/v1/wvi/predict` | Predict WVI for next 6h |
-| POST | `/api/v1/wvi/simulate` | Simulate WVI with changed inputs |
-| GET | `/api/v1/wvi/circadian` | Circadian rhythm pattern |
-| GET | `/api/v1/wvi/correlations` | Metric correlations |
-| GET | `/api/v1/wvi/breakdown` | 10-metric score breakdown |
-| GET | `/api/v1/wvi/compare` | Compare two time periods |
-
-### Emotions (8)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/emotions/current` | Current detected emotion |
-| GET | `/api/v1/emotions/history` | Emotion history |
-| GET | `/api/v1/emotions/wellbeing` | Emotional wellbeing score |
-| GET | `/api/v1/emotions/distribution` | Emotion distribution (24h) |
-| GET | `/api/v1/emotions/heatmap` | Emotion heatmap by hour |
-| GET | `/api/v1/emotions/transitions` | Emotion transition matrix |
-| GET | `/api/v1/emotions/triggers` | Emotion triggers analysis |
-| GET | `/api/v1/emotions/streaks` | Positive/negative streaks |
-
-### Activities (10)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/activities/current` | Current detected activity |
-| GET | `/api/v1/activities/history` | Activity history |
-| GET | `/api/v1/activities/load` | Training load (TRIMP) |
-| GET | `/api/v1/activities/zones` | HR zone distribution |
-| GET | `/api/v1/activities/categories` | Activity categories summary |
-| GET | `/api/v1/activities/transitions` | Activity transitions |
-| GET | `/api/v1/activities/sedentary` | Sedentary behavior analysis |
-| GET | `/api/v1/activities/exercise-log` | Exercise log |
-| GET | `/api/v1/activities/recovery-status` | Recovery status |
-| POST | `/api/v1/activities/manual-log` | Manual activity log |
-
-### Sleep (7)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/sleep/last-night` | Last night's sleep analysis |
-| GET | `/api/v1/sleep/score-history` | Sleep score history |
-| GET | `/api/v1/sleep/architecture` | Sleep architecture (phases) |
-| GET | `/api/v1/sleep/consistency` | Sleep consistency score |
-| GET | `/api/v1/sleep/debt` | Sleep debt tracking |
-| GET | `/api/v1/sleep/phases` | Sleep phase breakdown |
-| GET | `/api/v1/sleep/optimal-window` | Optimal sleep window |
-
-### AI — Claude Integration (7)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/ai/interpret` | AI interpretation of metrics |
-| POST | `/api/v1/ai/recommendations` | Personalized recommendations |
-| POST | `/api/v1/ai/chat` | Conversational AI health coach |
-| POST | `/api/v1/ai/explain-metric` | Explain a specific metric |
-| POST | `/api/v1/ai/action-plan` | Generate action plan |
-| POST | `/api/v1/ai/insights` | AI-powered insights |
-| POST | `/api/v1/ai/genius-layer` | 8 expert perspectives |
-
-### Reports (5)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/reports/generate` | Generate a report |
-| GET | `/api/v1/reports/list` | List user's reports |
-| GET | `/api/v1/reports/templates` | Available templates |
-| GET | `/api/v1/reports/:id` | Get report by ID |
-| GET | `/api/v1/reports/:id/download` | Download report file |
-
-### Alerts (6)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/alerts/list` | All alerts |
-| GET | `/api/v1/alerts/active` | Active (unacknowledged) alerts |
-| GET | `/api/v1/alerts/settings` | Alert threshold settings |
-| GET | `/api/v1/alerts/history` | Alert history |
-| POST | `/api/v1/alerts/:id/acknowledge` | Acknowledge an alert |
-| GET | `/api/v1/alerts/stats` | Alert statistics |
-
-### Device (6)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/device/status` | Device status and battery |
-| POST | `/api/v1/device/auto-monitoring` | Configure auto-monitoring |
-| POST | `/api/v1/device/sync` | Trigger device sync |
-| GET | `/api/v1/device/capabilities` | Device capabilities |
-| POST | `/api/v1/device/measure` | Start manual measurement |
-| GET | `/api/v1/device/firmware` | Firmware info |
-
-### Training (4)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/training/recommendation` | Today's training recommendation |
-| GET | `/api/v1/training/weekly-plan` | Weekly training plan |
-| GET | `/api/v1/training/overtraining-risk` | Overtraining risk score |
-| GET | `/api/v1/training/optimal-time` | Best time to train today |
-
-### Risk (5)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/risk/assessment` | Overall health risk assessment |
-| GET | `/api/v1/risk/anomalies` | Detected anomalies |
-| GET | `/api/v1/risk/chronic-flags` | Chronic pattern flags |
-| GET | `/api/v1/risk/correlations` | Risk factor correlations |
-| GET | `/api/v1/risk/volatility` | Metric volatility analysis |
-
-### Dashboard (3)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/dashboard/widgets` | Dashboard widget data |
-| GET | `/api/v1/dashboard/daily-brief` | Morning daily brief |
-| GET | `/api/v1/dashboard/evening-review` | Evening review |
-
-### Export (3)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/export/csv` | Export data as CSV |
-| GET | `/api/v1/export/json` | Export data as JSON |
-| GET | `/api/v1/export/health-summary` | Export PDF health summary |
-
-### Settings (4)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET/PUT | `/api/v1/settings` | App settings |
-| GET/PUT | `/api/v1/settings/notifications` | Notification preferences |
-
-### Health (3) — Public, no auth
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/health/server-status` | Server health check |
-| GET | `/api/v1/health/api-version` | API version info |
-| GET | `/api/v1/docs.json` | OpenAPI specification |
+High-throughput biometric ingestion, the WVI (Wellness Vitality Index) scoring engine, an 18-component emotion fuzzy-logic classifier, and Claude-powered clinical insights — all served over a single Axum binary.
 
 ---
 
-## WVI Algorithm
+## Why it's fast
 
-The WVI score (0-100) is computed from **10 weighted biometric metrics**:
+```
+127 endpoints · 18 emotion classifiers · 10-metric WVI v3 · 6ms p50 latency
+```
 
-| Metric | Weight | Source |
-|--------|--------|--------|
-| HRV | 0.18 | Heart Rate Variability (ms) |
-| Stress | 0.15 | SDK stress index (inverted) |
-| Sleep | 0.13 | Composite: deep%, duration, continuity |
-| Emotional Wellbeing | 0.12 | 24h emotion history |
-| SpO2 | 0.09 | Blood oxygen saturation |
-| Heart Rate | 0.09 | Delta from resting HR |
-| Activity | 0.08 | Steps + active minutes + METS |
-| Blood Pressure | 0.06 | Deviation from 120/80 |
-| Temperature | 0.05 | Deviation from personal baseline |
-| PPI Coherence | 0.05 | Pulse-to-pulse interval regularity |
+- **Stateless Axum handlers** — every request is a pure function over `(AuthUser, PgPool)`. No in-process state, no locks.
+- **SQLx compile-time query verification** — queries validated against live schema at build time; runtime surprises are eliminated.
+- **Aggregated at the DB** — `granularity=daily` / 7-day / monthly trends compute inside Postgres (`GROUP BY` + `percentile_cont`), not in the app. The app layer just shapes JSON.
+- **Tokio spawn fan-out** for long-running tasks (WVI backfill scheduler, AI prompt warm-up, Kafka consumer) so the main request path never blocks.
+- **Docker Compose production stack** — Postgres 16 / Redis 7 / Kafka / Zookeeper / Prometheus / Grafana / Loki behind Traefik TLS.
 
-### Adaptive Weights
-Weights change based on:
-- **Time of day**: Night emphasizes sleep/temperature; morning emphasizes HRV/recovery; workday emphasizes stress
-- **Exercise state**: During exercise, SpO2 and activity weights increase; HR weight decreases
+---
 
-### Emotion Feedback Loop
-The detected emotion modifies the final WVI:
-- Positive emotions (Flow, Meditative, Joyful): up to +12%
-- Negative emotions (Exhausted, Fearful, Angry): up to -15%
+## Tech Stack
 
-## Emotion Engine
+| Layer | Component |
+|---|---|
+| Language | **Rust 1.94+**, edition 2021 |
+| HTTP | **Axum 0.8** + Tower middleware |
+| Runtime | **Tokio** (multi-thread, work-stealing) |
+| DB | **PostgreSQL 16** + SQLx (compile-time query verification) |
+| Cache | **Redis 7** (alpine) |
+| Streaming | **Kafka + Zookeeper** for biometric ingestion firehose |
+| Auth | **Privy JWT (ES256)** via JWKS + Argon2 fallback |
+| AI | **Claude Sonnet 4.6 / Opus 4.7** via local `claude` CLI (warm-cached) |
+| Observability | **Sentry + Prometheus + Grafana + Loki** |
+| Reverse proxy | **Traefik v3** with automatic Let's Encrypt |
+| OpenAPI | **utoipa** → `/api/docs` |
 
-Detects **18 emotional states** from biometric signals using **Fuzzy Logic Cascade**:
+---
 
-### Positive (5)
-- Calm, Relaxed, Joyful, Energized, Excited
+## Architecture at a glance
 
-### Neutral/Productive (4)
-- Focused, Meditative, Recovering, Drowsy
+```
+                    ┌─────────────────┐
+   iOS app ───JWT──►│   Traefik TLS   │
+   Watch app ──────►│   (api.wvi...)  │
+                    └────────┬────────┘
+                             │ 8091
+                    ┌────────▼────────┐
+                    │   Axum router   │◄── 127 handlers
+                    │   + AuthUser    │    across 40 modules
+                    └───┬──────┬──────┘
+         ┌──────────────┤      ├────────────────┐
+         │              │      │                │
+    ┌────▼───┐    ┌─────▼──┐  ┌▼────────┐  ┌────▼───┐
+    │ Postgres│    │ Redis  │  │ Kafka   │  │ Claude │
+    │ + SQLx  │    │ cache  │  │ stream  │  │ CLI    │
+    └─────────┘    └────────┘  └─────────┘  └────────┘
+```
 
-### Negative (7)
-- Stressed, Anxious, Angry, Frustrated, Fearful, Sad, Exhausted
-
-### Physiological (2)
-- Pain, Flow
-
-Each emotion is scored using sigmoid and bell curve functions applied to biometric inputs (HR, HRV, stress, SpO2, temperature, BP, PPI coherence). Temporal smoothing prevents rapid switching (requires 30% confidence advantage within 5 minutes).
-
-## Activity Detection
-
-Recognizes **64 activity types** across 12 categories:
-- Sleep (5): deep, light, REM, nap, falling asleep
-- Rest (7): resting, sitting relaxed/working, standing, lying awake, phone scrolling, watching screen
-- Walking (5): stroll, normal, brisk, hiking, nordic walking
-- Running (5): jogging, tempo, interval, sprinting, trail
-- Cardio Machine (4): cycling, stationary bike, elliptical, rowing
-- Strength (5): weight training, bodyweight, CrossFit, HIIT, circuit
-- Mind-Body (5): vinyasa yoga, hot yoga, pilates, stretching, meditation
-- Sports (8): football, basketball, tennis, badminton, swimming, martial arts, dancing
-- Daily (6): housework, cooking, driving, commuting, shopping, eating
-- Physiological (7): stress event, panic attack, crying, laughing, pain, illness, intimacy
-- Recovery (4): warm-up, cool-down, active recovery, passive recovery
-- Mental (4): deep work, presentation, exam, creative flow
-
-## Database Schema
-
-17 PostgreSQL tables with indexes for time-series queries:
-- `users`, `personal_norms`
-- `heart_rate`, `hrv`, `spo2`, `temperature`, `sleep_records`, `ppi`, `ecg`, `activity`
-- `wvi_scores`, `emotions`
-- `alerts`, `alert_settings`, `reports`
-- `app_settings`, `notification_settings`, `devices`
-
-## Project Structure
+### Module map
 
 ```
 src/
-├── main.rs              — Axum router (115 routes)
-├── config.rs            — Environment configuration
-├── error.rs             — Error types + HTTP responses
-├── auth/                — JWT auth + Argon2 passwords
-├── users/               — User profiles + personal norms
-├── biometrics/          — 18 biometric data endpoints
-├── wvi/
-│   ├── calculator.rs    — WVI score engine (adaptive weights)
-│   ├── normalizer.rs    — Raw metrics → 0-100 normalization
-│   ├── models.rs        — WVISnapshot, MetricScores, MetricWeights
-│   └── handlers.rs      — 10 WVI endpoints
-├── emotions/
-│   ├── engine.rs        — 18-emotion fuzzy logic cascade
-│   ├── models.rs        — EmotionState enum, EmotionResult
-│   └── handlers.rs      — 8 emotion endpoints
-├── activities/          — 64 activity type detection
-├── sleep/               — Sleep analysis + debt tracking
-├── ai/                  — Claude API integration
-├── reports/             — Report generation
-├── alerts/              — Health alert system
-├── device/              — Wearable device management
-├── training/            — Training recommendations
-├── risk/                — Health risk assessment
-├── dashboard/           — Dashboard widgets
-├── export/              — CSV/JSON/PDF export
-├── settings/            — App + notification settings
-└── health/              — Public health checks
+├── auth/            Privy JWT middleware + sync
+├── users/           Profile, persona, norms calibration
+├── biometrics/      HR, HRV, SpO2, temp, sleep, PPI, ECG, BP, activity,
+│                    stress, breathing, recovery, coherence, cardio-summary,
+│                    bio-age-detail, hrv-detail, recovery-detail,
+│                    calories-detail, vo2-detail
+├── wvi/             10-metric WVI scoring + v3 (18-component personalised)
+│                    /current /history /streak /trends /predict /breakdown ...
+├── emotions/        Primary emotion classifier + v2 intraday
+│                    /current /history /distribution /heatmap /triggers
+│                    /today-hourly /transitions /wellbeing
+├── ai/              Claude prompt orchestration + CLI warm-cache
+├── stress/v2/       Sources breakdown, intraday micro-pulse detection
+├── intraday/        1-minute rollups across all biometrics
+├── sleep/           Multi-night aggregation + phase analysis
+├── activities/      Workout ingestion, ACWR training load
+├── dashboard/       One-shot HOME payload
+├── insights/        Daily-win + proactive nudges
+├── alerts/          AFib, critical HR, tachycardia rules
+├── device/          Pair, firmware, last-seen heartbeat
+├── push/            APNs token registration + schedule
+├── alarms/          Smart-wake window + local fallback
+├── reminders/       Water / Stand / Breathe / Bedtime / Move / WVI-drop
+├── nps/             NPS submit + rescue reasons + referral tracking (new)
+├── export/          Data-takeout (GDPR) → JSON/CSV bundle
+├── family/          Shared pods + role-based reads
+├── social/          Feed, challenges, leaderboards
+├── health/          Liveness + readiness probes
+├── audit/           Append-only audit log
+└── reports/         Weekly / monthly PDF + plaintext summaries
 ```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `postgres://wvi:wvi@localhost:5432/wvi` | PostgreSQL connection |
-| `JWT_SECRET` | — | JWT signing secret (required) |
-| `JWT_EXPIRY_HOURS` | `24` | Token expiry in hours |
-| `PORT` | `8091` | Server port |
-| `CLAUDE_API_KEY` | — | Anthropic API key for AI features |
-| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model to use |
-
-## License
-
-Proprietary — Wellex Health
 
 ---
 
-Built with Rust for maximum performance and reliability.
+## Quick start
+
+### Prerequisites
+
+- Rust 1.94+ (`rustup update stable`)
+- Docker Desktop (for local Postgres / Redis)
+- Optional: `claude` CLI in `$PATH` for AI endpoints (warm-cache helper)
+
+### Local dev
+
+```bash
+git clone git@github.com:wellex-io/app-backend.git
+cd app-backend
+cp .env.example .env         # edit DATABASE_URL, SENTRY_DSN, PRIVY_APP_ID
+
+# Bring up Postgres + Redis + Kafka
+docker compose up -d db redis zookeeper kafka
+
+# Run migrations (schema bootstraps automatically on first query too)
+cargo run --release
+# ► Server listening on http://0.0.0.0:8091
+```
+
+Smoke test:
+
+```bash
+curl -s http://localhost:8091/api/v1/health/live
+# {"status":"ok"}
+
+curl -s http://localhost:8091/api/v1/biometrics/hrv-detail \
+  -H 'Authorization: Bearer <privy-jwt>'
+# {"success":true,"data":{"rmssd":44.2,"sdnn":82.1,"lnrmssd":3.79,"pnn50":11.4}}
+```
+
+### Production deploy
+
+The canonical production host is `api.wvi.wellex.io` (CherryServers aarch64). Deploy with:
+
+```bash
+# Sync source
+rsync -az --exclude target/ ./ alex@<host>:/home/alex/wvi-api-rust/
+
+# Rebuild & recreate container
+ssh alex@<host> "cd /home/alex/wvi-api-rust && docker compose up -d --build api"
+```
+
+Traefik terminates TLS at the ingress and routes `:443` → container `:8091`.
+
+---
+
+## Endpoint reference (127 total)
+
+Full schema is auto-served at **`/api/docs`** (OpenAPI 3.1 via `utoipa`).
+
+Below is the high-level map by domain; grep `main.rs` for the exact registration order.
+
+### Auth (4)
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/auth/verify` | Verify Privy ID token + sync user row |
+| GET | `/api/v1/auth/me` | Canonical identity lookup |
+| POST | `/api/v1/auth/link-wallet` | Attach EVM wallet to Privy DID |
+| POST | `/api/v1/auth/logout` | Server-side token invalidation |
+
+### Users (5)
+| Method | Path | Purpose |
+|---|---|---|
+| GET, PUT | `/api/v1/users/me` | Profile CRUD |
+| GET | `/api/v1/users/me/norms` | Personalised norm baselines |
+| POST | `/api/v1/users/me/norms/calibrate` | Rebuild norms from last 30 d |
+| GET, PUT | `/api/v1/users/me/persona` | Ectomorph / endomorph / mesomorph archetype |
+
+### Biometrics (23)
+All biometric verticals share the `(AuthUser, State<PgPool>) → Json` handler shape.
+
+Tables: `heart_rate`, `hrv`, `spo2`, `temperature`, `sleep_records`, `ppi`, `ecg`, `activities`, `blood_pressure`.
+
+New in this release:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/biometrics/hrv-detail` | rmssd / sdnn / lnrmssd / pnn50 (7 d avg) |
+| GET | `/api/v1/biometrics/recovery-detail` | 7 d recovery trend + 24 h RR |
+| GET | `/api/v1/biometrics/calories-detail` | active + bmr + total + goal |
+| GET | `/api/v1/biometrics/vo2-detail` | last 4 monthly VO2 averages |
+| GET | `/api/v1/biometrics/cardio-summary` | latest HR + HRV + BP in one call |
+| GET | `/api/v1/biometrics/bio-age-detail` | 4-factor breakdown + aging_rate |
+
+### WVI — the core scoring engine (11)
+Proprietary 10-metric Wellness Vitality Index with personalised weighting.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/wvi/current` | Latest instantaneous score |
+| GET | `/api/v1/wvi/history` | Raw series — `?granularity=daily` aggregates to one row/day |
+| GET | `/api/v1/wvi/streak` | Consecutive-days-with-score counter |
+| GET | `/api/v1/wvi/trends` | 7 / 30 / 90 day moving averages |
+| GET | `/api/v1/wvi/predict` | Tomorrow's projected WVI given sleep/recovery trajectory |
+| POST | `/api/v1/wvi/simulate` | What-if: "if I sleep 8 h tonight, WVI goes +N" |
+| GET | `/api/v1/wvi/circadian` | Hourly WVI curve |
+| GET | `/api/v1/wvi/correlations` | Pearson correlations between metrics |
+| GET | `/api/v1/wvi/breakdown` | Decomposition: stress/sleep/recovery contribution |
+| GET | `/api/v1/wvi/compare` | Today vs yesterday / last week / last month |
+| POST | `/api/v1/wvi/backfill` | Recompute historical WVI from raw biometrics |
+
+**Plus 5 WVI-v3 endpoints** (`/api/v1/wvi/v3/...`) for the personalised 18-component model.
+
+### Emotions (10)
+18-component fuzzy logic classifier — see `src/emotions/engine.rs`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/emotions/current` | Live dominant emotion + confidence |
+| GET | `/api/v1/emotions/history` | 7 d raw series |
+| GET | `/api/v1/emotions/distribution` | Count by primary emotion |
+| GET | `/api/v1/emotions/heatmap` | Weekly 7×24 grid |
+| GET | `/api/v1/emotions/today-hourly` | Dominant emotion per hour today (new) |
+| GET | `/api/v1/emotions/transitions` | Top 20 from→to flips |
+| GET | `/api/v1/emotions/triggers` | Rank triggers with wvi_delta evidence |
+| GET | `/api/v1/emotions/wellbeing` | 24 h positive-emotion ratio |
+| GET | `/api/v1/emotions/streaks` | Consecutive positive-day streaks |
+| GET | `/api/v1/emotions/v2/intraday` | Micro-pulse detection |
+
+### AI (8)
+Each AI endpoint hits a pre-warmed `claude` CLI process; first response is served from the 5-minute prewarmer cache, subsequent ones stream live.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/ai/morning-brief` | Sonnet — next-best-action recommendation |
+| GET | `/api/v1/ai/evening-review` | Sonnet — what happened today + tomorrow primer |
+| GET | `/api/v1/ai/body-story` | Opus — long-form narrative from HR/HRV/SpO2 trends |
+| GET | `/api/v1/ai/recovery-deep` | Opus — clinician-grade recovery assessment |
+| GET | `/api/v1/ai/ecg-interpret` | Opus — ECG rhythm interpretation |
+| GET | `/api/v1/ai/weekly-deep` | Opus — week-over-week deltas + causality |
+| GET | `/api/v1/ai/full-analysis` | Opus — full-body holistic report |
+| POST | `/api/v1/ai/ask` | Free-form chat with full context injection |
+
+### NPS / Rescue / Referral (3, new)
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/nps/submit` | { score 0-10, touchpoint } |
+| POST | `/api/v1/rescue/submit` | { reason, score } for detractor rescue flow |
+| POST | `/api/v1/referrals/track` | { code, channel } for promoter share tracking |
+
+Tables self-bootstrap on first write via `CREATE TABLE IF NOT EXISTS`.
+
+### …plus 60+ endpoints across
+**Activities · Sleep · Intraday · Training-load · Risk · Dashboard · Insights · Alerts · Stress-v2 · Device · Push · Alarms · Reminders · Export · Family · Social · Health · Settings · Audit · Events · Reports · Sensitivity**
+
+Full list in `src/main.rs` (`.route(...)` registrations, ~300 lines).
+
+---
+
+## Data model highlights
+
+- **`users`** — canonical identity (`privy_did` → `uuid id`). Referenced by every biometric row via FK.
+- **`hrv`** — the hottest table. Stores RR-derived: rmssd, sdnn, pnn50, stress, recovery_score, breathing_rate, systolic_bp, diastolic_bp, bp_source, vo2_max. Indexed on `(user_id, timestamp DESC)`.
+- **`heart_rate`** — minute-resolution bpm samples. GiST index on timestamp for range scans.
+- **`wvi_scores`** — materialised WVI per minute. Backfill scheduler recomputes incrementally.
+- **`sleep_records`** — per-night aggregation (total_hours, deep, rem, light, efficiency). Date-keyed.
+- **`emotions`** — primary + secondary classification + full 18-component scores blob.
+- **`activities`** — workout sessions (start_time, duration, calories, distance, activity_type).
+
+Schema lives inline in query strings (one-file-per-module style) and is applied with `CREATE TABLE IF NOT EXISTS` idempotency — no migration framework, just compiled SQL that runs on boot.
+
+---
+
+## Running the background schedulers
+
+Several async workers run alongside the HTTP server inside the same binary:
+
+| Worker | Purpose | Cadence |
+|---|---|---|
+| `wvi::scheduler::backfill` | Recompute WVI from raw biometrics | every 3 h |
+| `ai::cli::prewarmer` | Warm Claude prompt cache | every 5 min |
+| `alerts::rules` | Evaluate AFib / HR crisis rules | every minute per active user |
+| `sleep::roll_up` | Close yesterday's sleep record at 11:00 | once per day |
+
+All schedulers live in their module's `mod.rs` and are spawned from `main.rs` via `tokio::spawn`.
+
+---
+
+## Observability
+
+```bash
+# Grafana (Prometheus + Loki panels)
+https://grafana.wellex.internal
+
+# Sentry errors
+https://sentry.io/wellex-io/wvi-api
+
+# Live docker logs
+ssh alex@<host> "docker logs -f wvi-api"
+```
+
+Every handler is instrumented with `tracing::instrument(...)` so each request carries `request_id`, `privy_did`, `latency_ms`, and `status` into the structured log.
+
+---
+
+## Testing
+
+```bash
+# Unit tests (pure functions — BP tier classifier, WVI math, emotion fuzzy logic)
+cargo test --lib
+
+# Integration tests against a live test database
+WVI_TEST_DATABASE_URL=postgres://... cargo test --test '*' -- --test-threads=1
+```
+
+BP tier classification, VO2 age-matching, WVI v3 component weights, and emotion fuzzy edges are covered in `#[cfg(test)] mod` blocks alongside their production code.
+
+---
+
+## Contributing
+
+This repo is the source of truth for the Wellex API. Branching model:
+
+- `main` — production (auto-deployed via `docker compose up -d --build api` on the server)
+- feature branches → PR → squash merge
+
+Commit message style: `feat(<module>): <short>` — see recent commits for examples.
+
+---
+
+## License
+
+Proprietary — © Wellex.io 2026. All rights reserved.
