@@ -41,15 +41,17 @@ pub async fn verify(
     .execute(&pool)
     .await?;
 
-    // Fetch the user back
-    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, chrono::DateTime<Utc>)>(
-        "SELECT privy_did, email, name, created_at FROM users WHERE privy_did = $1",
+    // Fetch the user back (incl. is_reviewer for the App Store review flow)
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, chrono::DateTime<Utc>, bool)>(
+        "SELECT privy_did, email, name, created_at, COALESCE(is_reviewer, FALSE) \
+         FROM users WHERE privy_did = $1",
     )
     .bind(did)
     .fetch_one(&pool)
     .await?;
 
-    crate::audit::log_action(&pool, did, "auth.verify", "session", None, None, None, None).await;
+    let action = if row.4 { "auth.verify.reviewer" } else { "auth.verify" };
+    crate::audit::log_action(&pool, did, action, "session", None, None, None, None).await;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -61,6 +63,7 @@ pub async fn verify(
             "walletAddress": wallet,
             "linkedAccounts": linked,
             "createdAt": row.3,
+            "isReviewer": row.4,
         }
     })))
 }
@@ -70,8 +73,10 @@ pub async fn me(
     user: AuthUser,
     State(pool): State<PgPool>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, serde_json::Value, chrono::DateTime<Utc>)>(
-        "SELECT privy_did, email, name, COALESCE(linked_accounts, '[]'::jsonb), created_at FROM users WHERE privy_did = $1",
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, serde_json::Value, chrono::DateTime<Utc>, bool)>(
+        "SELECT privy_did, email, name, COALESCE(linked_accounts, '[]'::jsonb), created_at, \
+                COALESCE(is_reviewer, FALSE) \
+         FROM users WHERE privy_did = $1",
     )
     .bind(&user.privy_did)
     .fetch_optional(&pool)
@@ -87,6 +92,7 @@ pub async fn me(
             "name": row.2,
             "linkedAccounts": row.3,
             "createdAt": row.4,
+            "isReviewer": row.5,
         }
     })))
 }
