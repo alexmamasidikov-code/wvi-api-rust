@@ -334,23 +334,82 @@ pub async fn get_history(user: AuthUser, State(pool): State<PgPool>, Query(q): Q
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
-/// GET /wvi/streak — cheap day-count endpoint for the HOME streak pill.
+/// GET /wvi/streak — HOME streak pill.
+///
+/// Returns the *consecutive* daily streak (current run of days ending today
+/// that have at least one wvi_score row) plus contextual fields. The legacy
+/// `days` field stays for backward-compat: it is the **total** number of
+/// distinct active days in the last 365d (what the previous version returned).
+///
+/// Streak rule: a day "counts" if `wvi_scores` has any row dated that day in
+/// the user's local-ish view (we use UTC date here — drift of a few hours is
+/// acceptable for a streak pill). The streak is the longest tail of
+/// consecutive dates ending on either today or yesterday (a one-day grace
+/// keeps the streak alive across the user's timezone midnight). If the most
+/// recent active day is older than yesterday, currentStreak = 0.
 pub async fn get_streak(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    let row: Option<(i64, Option<chrono::NaiveDate>, Option<chrono::NaiveDate>)> = sqlx::query_as(
+    let dates: Vec<chrono::NaiveDate> = sqlx::query_as::<_, (chrono::NaiveDate,)>(
         r#"
-        SELECT
-            COUNT(DISTINCT timestamp::date)::bigint AS days,
-            MIN(timestamp::date) AS first_day,
-            MAX(timestamp::date) AS last_day
+        SELECT DISTINCT timestamp::date AS d
         FROM wvi_scores
         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
           AND timestamp > NOW() - INTERVAL '365 days'
+        ORDER BY d DESC
         "#
-    ).bind(&user.privy_did).fetch_optional(&pool).await?;
-    let (days, first, last) = row.unwrap_or((0, None, None));
+    ).bind(&user.privy_did).fetch_all(&pool).await?
+     .into_iter().map(|r| r.0).collect();
+
+    let total_days = dates.len() as i64;
+    let last = dates.first().copied();
+    let first = dates.last().copied();
+    let today = Utc::now().date_naive();
+    let yesterday = today - chrono::Duration::days(1);
+
+    let days_since_last = last.map(|d| (today - d).num_days()).unwrap_or(-1);
+
+    // currentStreak: walk back from `last` while consecutive. Only counts if
+    // the most recent active day is today or yesterday (one-day grace).
+    let current_streak: i64 = match last {
+        Some(d) if d == today || d == yesterday => {
+            let mut count: i64 = 0;
+            let mut expected = d;
+            for date in &dates {
+                if *date == expected {
+                    count += 1;
+                    expected = expected - chrono::Duration::days(1);
+                } else if *date < expected {
+                    break;
+                }
+            }
+            count
+        }
+        _ => 0,
+    };
+
+    // longestStreak: max run of consecutive dates anywhere in `dates`.
+    let mut longest_streak: i64 = 0;
+    let mut run: i64 = 0;
+    let mut prev: Option<chrono::NaiveDate> = None;
+    for date in dates.iter().rev() {
+        match prev {
+            Some(p) if *date == p + chrono::Duration::days(1) => run += 1,
+            _ => run = 1,
+        }
+        if run > longest_streak { longest_streak = run; }
+        prev = Some(*date);
+    }
+
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": { "days": days, "first_day": first, "last_day": last }
+        "data": {
+            "currentStreak": current_streak,
+            "longestStreak": longest_streak,
+            "lastActiveDay": last,
+            "daysSinceLastActive": days_since_last,
+            "days": total_days,
+            "first_day": first,
+            "last_day": last,
+        }
     })))
 }
 

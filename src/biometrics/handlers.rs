@@ -1037,20 +1037,71 @@ pub async fn get_computed(user: AuthUser, State(pool): State<PgPool>) -> AppResu
 }
 
 // ═══ REALTIME SNAPSHOT ═══
+//
+// Returns the most recent biometric reading for each metric, but ONLY if the
+// reading is recent (within `REALTIME_WINDOW_HOURS`). Anything older than that
+// resolves to null on the wire — the client should render a "no data" state
+// rather than a stale number. This is the fix for the "bracelet has been off
+// for two days but the app still shows yesterday's HR/WVI" bug.
+//
+// We also surface the *real* sample timestamp per metric (not the request
+// time) so the client can independently decide whether a value is fresh
+// enough for its UI.
 pub async fn get_realtime(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
-    let hr = sqlx::query_as::<_, (f32,)>("SELECT bpm FROM heart_rate WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1").bind(&user.privy_did).fetch_optional(&pool).await?;
-    let hrv = sqlx::query_as::<_, (Option<f32>, Option<f32>)>("SELECT rmssd, stress FROM hrv WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1").bind(&user.privy_did).fetch_optional(&pool).await?;
-    let spo2 = sqlx::query_as::<_, (f32,)>("SELECT value FROM spo2 WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1").bind(&user.privy_did).fetch_optional(&pool).await?;
-    let temp = sqlx::query_as::<_, (f32,)>("SELECT value FROM temperature WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1").bind(&user.privy_did).fetch_optional(&pool).await?;
+    const REALTIME_WINDOW_HOURS: i64 = 6;
+    let cutoff = Utc::now() - Duration::hours(REALTIME_WINDOW_HOURS);
+
+    let hr = sqlx::query_as::<_, (f32, chrono::DateTime<Utc>)>(
+        "SELECT bpm, timestamp FROM heart_rate \
+         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) \
+           AND timestamp >= $2 \
+         ORDER BY timestamp DESC LIMIT 1"
+    ).bind(&user.privy_did).bind(cutoff).fetch_optional(&pool).await?;
+
+    let hrv = sqlx::query_as::<_, (Option<f32>, Option<f32>, chrono::DateTime<Utc>)>(
+        "SELECT rmssd, stress, timestamp FROM hrv \
+         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) \
+           AND timestamp >= $2 \
+         ORDER BY timestamp DESC LIMIT 1"
+    ).bind(&user.privy_did).bind(cutoff).fetch_optional(&pool).await?;
+
+    let spo2 = sqlx::query_as::<_, (f32, chrono::DateTime<Utc>)>(
+        "SELECT value, timestamp FROM spo2 \
+         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) \
+           AND timestamp >= $2 \
+         ORDER BY timestamp DESC LIMIT 1"
+    ).bind(&user.privy_did).bind(cutoff).fetch_optional(&pool).await?;
+
+    let temp = sqlx::query_as::<_, (f32, chrono::DateTime<Utc>)>(
+        "SELECT value, timestamp FROM temperature \
+         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) \
+           AND timestamp >= $2 \
+         ORDER BY timestamp DESC LIMIT 1"
+    ).bind(&user.privy_did).bind(cutoff).fetch_optional(&pool).await?;
+
+    let newest = [
+        hr.as_ref().map(|r| r.1),
+        hrv.as_ref().map(|r| r.2),
+        spo2.as_ref().map(|r| r.1),
+        temp.as_ref().map(|r| r.1),
+    ].into_iter().flatten().max();
+    let stale = newest.is_none();
 
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
-            "heartRate": hr.map(|r| r.0),
+            "heartRate": hr.as_ref().map(|r| r.0),
             "hrv": hrv.as_ref().and_then(|r| r.0),
             "stress": hrv.as_ref().and_then(|r| r.1),
-            "spo2": spo2.map(|r| r.0),
-            "temperature": temp.map(|r| r.0),
+            "spo2": spo2.as_ref().map(|r| r.0),
+            "temperature": temp.as_ref().map(|r| r.0),
+            "heartRateAt": hr.as_ref().map(|r| r.1),
+            "hrvAt": hrv.as_ref().map(|r| r.2),
+            "spo2At": spo2.as_ref().map(|r| r.1),
+            "temperatureAt": temp.as_ref().map(|r| r.1),
+            "newestSampleAt": newest,
+            "stale": stale,
+            "windowHours": REALTIME_WINDOW_HOURS,
             "timestamp": Utc::now(),
         }
     })))
