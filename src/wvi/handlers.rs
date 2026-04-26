@@ -6,9 +6,47 @@ use crate::error::AppResult;
 use super::models::*;
 use super::calculator::{WviV2Calculator, WviV2Input};
 
-/// GET /wvi/current — Calculate live WVI v2 from latest biometrics
+/// GET /wvi/current — Calculate live WVI v2 from latest biometrics.
+///
+/// If no biometric of any kind has arrived in the last
+/// `WVI_CURRENT_FRESHNESS_HOURS`, return early with `stale: true` and
+/// `wviScore: null`. Previously this endpoint silently substituted
+/// population defaults (HR=72, SpO2=98, temp=36.6, sleep=85, etc.) and
+/// stored the resulting fake score in `wvi_scores`, which is exactly
+/// the "app shows WVI even though the bracelet has been off for two
+/// days" bug. The fake row also poisoned the streak / weekly trend.
 #[tracing::instrument(name = "wvi.compute_current", skip_all, fields(user = %user.privy_did))]
 pub async fn get_current(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
+    const WVI_CURRENT_FRESHNESS_HOURS: i64 = 6;
+    let cutoff = Utc::now() - Duration::hours(WVI_CURRENT_FRESHNESS_HOURS);
+
+    let newest: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        r#"SELECT MAX(latest_ts) FROM (
+              SELECT MAX(timestamp) latest_ts FROM heart_rate  WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+              UNION ALL
+              SELECT MAX(timestamp)            FROM hrv         WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+              UNION ALL
+              SELECT MAX(timestamp)            FROM spo2        WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+              UNION ALL
+              SELECT MAX(timestamp)            FROM temperature WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+              UNION ALL
+              SELECT MAX(timestamp)            FROM activity    WHERE user_id = (SELECT id FROM users WHERE privy_did = $1)
+           ) t"#
+    ).bind(&user.privy_did).fetch_one(&pool).await?;
+
+    if newest.map_or(true, |t| t < cutoff) {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "wviScore": serde_json::Value::Null,
+                "stale": true,
+                "newestSampleAt": newest,
+                "windowHours": WVI_CURRENT_FRESHNESS_HOURS,
+                "reason": "no_recent_biometrics",
+            }
+        })));
+    }
+
     // Fetch latest biometrics
     let hr = sqlx::query_as::<_, (f32,)>("SELECT bpm FROM heart_rate WHERE user_id = (SELECT id FROM users WHERE privy_did = $1) ORDER BY timestamp DESC LIMIT 1")
         .bind(&user.privy_did).fetch_optional(&pool).await?.map(|r| r.0 as f64).unwrap_or(72.0);
