@@ -12,6 +12,32 @@ pub async fn get_current(
     State(pool): State<PgPool>,
 ) -> AppResult<Json<crate::wvi::v3::aggregator::WviV3Result>> {
     let user_id = crate::users::resolve_user_id(&pool, &user.privy_did).await?;
+
+    // Refuse to compute when there are no recent biometric inputs at all.
+    // The v3 aggregator fills missing components with a 50.0 placeholder
+    // (per-component baseline queries are still TODO), so calling this
+    // for a disconnected account collapsed to a believable "score = 51"
+    // hero. Clients (HeroWVIView / WVIViewModel) treat a 404 as
+    // "no data" and fall back to the empty state.
+    const FRESHNESS_HOURS: i64 = 6;
+    let cutoff = Utc::now() - chrono::Duration::hours(FRESHNESS_HOURS);
+    let newest: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        r#"SELECT MAX(latest_ts) FROM (
+              SELECT MAX(timestamp) latest_ts FROM heart_rate  WHERE user_id = $1
+              UNION ALL
+              SELECT MAX(timestamp)            FROM hrv         WHERE user_id = $1
+              UNION ALL
+              SELECT MAX(timestamp)            FROM spo2        WHERE user_id = $1
+              UNION ALL
+              SELECT MAX(timestamp)            FROM temperature WHERE user_id = $1
+              UNION ALL
+              SELECT MAX(timestamp)            FROM activity    WHERE user_id = $1
+           ) t"#
+    ).bind(user_id).fetch_one(&pool).await.unwrap_or(None);
+    if newest.map_or(true, |t| t < cutoff) {
+        return Err(AppError::NotFound("no_recent_biometrics".into()));
+    }
+
     let result = crate::wvi::v3::aggregator::compute_wvi_v3(&pool, user_id, Utc::now())
         .await
         .map_err(|e| AppError::Internal(format!("{e}")))?;
