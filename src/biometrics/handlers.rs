@@ -835,10 +835,20 @@ pub async fn get_coherence(user: AuthUser, State(pool): State<PgPool>, Query(q):
 pub async fn get_recovery(user: AuthUser, State(pool): State<PgPool>) -> AppResult<Json<serde_json::Value>> {
     let uid = get_user_uuid(&pool, &user.privy_did).await?;
 
-    // Get latest HRV (morning reading)
-    let morning_hrv = sqlx::query_scalar::<_, f32>(
-        "SELECT rmssd FROM hrv WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 1"
-    ).bind(uid).fetch_optional(&pool).await?.unwrap_or(0.0) as f64;
+    const RECOVERY_FRESHNESS_HOURS: i64 = 24;
+    let cutoff = Utc::now() - Duration::hours(RECOVERY_FRESHNESS_HOURS);
+
+    // Get latest HRV (morning reading) — must be within the freshness
+    // window. Without this gate the endpoint happily returned a recovery
+    // percentage based on HRV samples from days ago, which is exactly
+    // the "Recovery 74% Ready" you see when the bracelet has been off.
+    let morning_hrv_row = sqlx::query_as::<_, (f32, chrono::DateTime<Utc>)>(
+        "SELECT rmssd, timestamp FROM hrv \
+         WHERE user_id = $1 AND timestamp >= $2 \
+         ORDER BY timestamp DESC LIMIT 1"
+    ).bind(uid).bind(cutoff).fetch_optional(&pool).await?;
+    let morning_hrv = morning_hrv_row.as_ref().map(|r| r.0 as f64).unwrap_or(0.0);
+    let morning_hrv_at = morning_hrv_row.as_ref().map(|r| r.1);
 
     // Get 7-day HRV baseline (average)
     let baseline_hrv = sqlx::query_scalar::<_, f64>(
@@ -855,14 +865,18 @@ pub async fn get_recovery(user: AuthUser, State(pool): State<PgPool>) -> AppResu
         "SELECT COUNT(DISTINCT DATE(timestamp)) FROM hrv WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '7 days'"
     ).bind(uid).fetch_one(&pool).await.unwrap_or(0);
 
-    // Need at least morning HRV to calculate
+    // Need at least morning HRV to calculate — and the sample must be
+    // recent. Stale HRV produces a misleading "ready" state.
     if morning_hrv == 0.0 {
         return Ok(Json(serde_json::json!({
             "success": true,
             "data": {
                 "ready": false,
-                "reason": "No HRV data available. Wear bracelet and stay still for 60 seconds.",
+                "reason": "No recent HRV data. Wear the bracelet and stay still for 60 seconds.",
                 "recoveryPercent": null,
+                "stale": true,
+                "windowHours": RECOVERY_FRESHNESS_HOURS,
+                "lastHRVAt": morning_hrv_at,
             }
         })));
     }
